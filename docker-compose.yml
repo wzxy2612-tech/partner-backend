@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: partner_backend
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d partner_backend"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      OWNER_DATABASE_URL: postgresql+psycopg://app_owner:owner_pw@db:5432/partner_backend
+      RUNTIME_DATABASE_URL: postgresql+psycopg://app_runtime:runtime_pw@db:5432/partner_backend
+      PLATFORM_DATABASE_URL: postgresql+psycopg://app_platform:platform_pw@db:5432/partner_backend
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+volumes:
+  pgdata:
