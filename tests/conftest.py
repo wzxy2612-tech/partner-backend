@@ -22,16 +22,20 @@ PARTNER_A = UUID("11111111-1111-1111-1111-111111111111")
 PARTNER_B = UUID("22222222-2222-2222-2222-222222222222")
 COMPANY_A = UUID("aaaaaaaa-0000-0000-0000-000000000001")
 COMPANY_B = UUID("bbbbbbbb-0000-0000-0000-000000000001")
+COMPANY_A2 = UUID("aaaaaaaa-0000-0000-0000-000000000002")
 WORKSPACE_A_PARENT = UUID("aaaaaaaa-0000-0000-0000-0000000000a1")
 WORKSPACE_A_CHILD = UUID("aaaaaaaa-0000-0000-0000-0000000000a2")
 WORKSPACE_B = UUID("bbbbbbbb-0000-0000-0000-0000000000b2")
 USER_A = UUID("aaaaaaaa-0000-0000-0000-0000000000d1")
 USER_B = UUID("bbbbbbbb-0000-0000-0000-0000000000b1")
+USER_CA = UUID("aaaaaaaa-0000-0000-0000-0000000000ca")   # company_admin @ Company A
+USER_RO = UUID("aaaaaaaa-0000-0000-0000-0000000000e0")   # read_only @ Company A
 DIRECT_USER = UUID("cccccccc-0000-0000-0000-0000000000c1")
 NIL = UUID("00000000-0000-0000-0000-000000000000")
 
 PW_A = "pw-a-secret"
 PW_DIRECT = "pw-direct-secret"
+PW_CA = "pw-ca-secret"
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -61,9 +65,12 @@ def ids(platform_engine):
     app_platform (BYPASSRLS); re-seeded per test."""
     pw_a = hash_password(PW_A)
     pw_direct = hash_password(PW_DIRECT)
+    pw_ca = hash_password(PW_CA)
     with platform_engine.begin() as c:
-        for tbl in ["partner_activity_log", "sessions", "memberships", "workspaces",
-                    "companies", "subscriptions", "users", "partners"]:
+        for tbl in ["invitations", "partner_activity_log", "sessions", "memberships",
+                    "workflows", "workflow_templates", "connectors", "token_usage",
+                    "threads", "workspaces", "companies", "subscriptions", "users",
+                    "partners"]:
             c.execute(text(f"DELETE FROM {tbl}"))
         c.execute(text(
             "INSERT INTO partners (id,name,status) "
@@ -74,6 +81,9 @@ def ids(platform_engine):
             "(:ca,:a,'Company A','{\"color\":\"navy\",\"logo\":\"co-a\"}'::jsonb),"
             "(:cb,:b,'Company B','{}'::jsonb)"),
             {"ca": str(COMPANY_A), "a": str(PARTNER_A), "cb": str(COMPANY_B), "b": str(PARTNER_B)})
+        c.execute(text("INSERT INTO companies (id,partner_id,name,branding) "
+                       "VALUES (:ca2,:a,'Company A2','{}'::jsonb)"),
+                  {"ca2": str(COMPANY_A2), "a": str(PARTNER_A)})
         c.execute(text(
             "INSERT INTO workspaces (id,partner_id,company_id,parent_workspace_id,name,branding) VALUES "
             "(:wp,:a,:ca,NULL,'Hub A','{\"logo\":\"hub-a\"}'::jsonb),"
@@ -90,9 +100,19 @@ def ids(platform_engine):
              "ub": str(USER_B), "b": str(PARTNER_B),
              "ud": str(DIRECT_USER), "pwd": pw_direct, "nil": str(NIL)})
         c.execute(text(
+            "INSERT INTO users (id,email,hashed_password,partner_id,billing_source) VALUES "
+            "(:uca,'ca@partner.test',:pwca,:a,'partner'),"
+            "(:uro,'ro@partner.test',NULL,:a,'partner')"),
+            {"uca": str(USER_CA), "pwca": pw_ca, "uro": str(USER_RO), "a": str(PARTNER_A)})
+        c.execute(text(
             "INSERT INTO memberships (user_id,partner_id,scope_type,scope_id,role) "
             "VALUES (:ua,:a,'partner',:a,'partner_super_admin')"),
             {"ua": str(USER_A), "a": str(PARTNER_A)})
+        c.execute(text(
+            "INSERT INTO memberships (user_id,partner_id,scope_type,scope_id,role) VALUES "
+            "(:uca,:a,'company',:ca,'company_admin'),"
+            "(:uro,:a,'company',:ca,'read_only')"),
+            {"uca": str(USER_CA), "uro": str(USER_RO), "a": str(PARTNER_A), "ca": str(COMPANY_A)})
         c.execute(text(
             "INSERT INTO partner_activity_log (partner_id,event_type) "
             "VALUES (:a,'partner.activated'),(:b,'partner.activated')"),
@@ -101,7 +121,8 @@ def ids(platform_engine):
         partner_a=PARTNER_A, partner_b=PARTNER_B, company_a=COMPANY_A, company_b=COMPANY_B,
         workspace_a_parent=WORKSPACE_A_PARENT, workspace_a_child=WORKSPACE_A_CHILD,
         workspace_b=WORKSPACE_B, user_a=USER_A, user_b=USER_B, direct_user=DIRECT_USER,
-        nil=NIL, pw_a=PW_A, pw_direct=PW_DIRECT)
+        nil=NIL, pw_a=PW_A, pw_direct=PW_DIRECT,
+        company_a2=COMPANY_A2, user_ca=USER_CA, user_ro=USER_RO, pw_ca=PW_CA)
 
 
 @pytest.fixture()

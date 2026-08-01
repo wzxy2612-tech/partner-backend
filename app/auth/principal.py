@@ -4,6 +4,10 @@ Authentication runs on the platform path (BYPASSRLS) because it must read the
 session/user/partner rows BEFORE any tenant scope exists. The resolved
 partner_id then drives which DB path (and RLS scope) the request runs under --
 the client never supplies it.
+
+A principal carries not just its roles but the *scope* each role was granted at
+(`grants`), so RBAC can enforce both "has this permission" and "at a scope that
+reaches the target".
 """
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -16,9 +20,12 @@ from app.models.session import Session as SessionRow
 from app.models.user import User
 from app.models.partner import Partner
 from app.models.membership import Membership
-from app.models.enums import Role, PartnerStatus
+from app.models.enums import Role, ScopeType, PartnerStatus
 
 NIL = UUID("00000000-0000-0000-0000-000000000000")
+
+# (role, (scope_type, scope_id)) -- one entry per membership.
+Grant = tuple[Role, tuple[ScopeType, UUID]]
 
 
 @dataclass
@@ -27,6 +34,7 @@ class Principal:
     partner_id: UUID
     is_platform: bool
     roles: list[Role] = field(default_factory=list)
+    grants: list[Grant] = field(default_factory=list)
     partner_status: PartnerStatus | None = None
 
     @property
@@ -58,6 +66,8 @@ def authenticate(db: OrmSession, token: str | None) -> Principal | None:
         partner = db.get(Partner, partner_id)
         partner_status = partner.status if partner else None
 
-    roles = [m.role for m in db.query(Membership).filter(Membership.user_id == user.id).all()]
-    return Principal(user_id=user.id, partner_id=partner_id,
-                     is_platform=is_platform, roles=roles, partner_status=partner_status)
+    memberships = db.query(Membership).filter(Membership.user_id == user.id).all()
+    roles = [m.role for m in memberships]
+    grants: list[Grant] = [(m.role, (m.scope_type, m.scope_id)) for m in memberships]
+    return Principal(user_id=user.id, partner_id=partner_id, is_platform=is_platform,
+                     roles=roles, grants=grants, partner_status=partner_status)

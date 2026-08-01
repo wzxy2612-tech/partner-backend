@@ -39,11 +39,12 @@ def test_activate_clears_suspension(ids, platform_orm):
 
 
 def test_deactivate_domain_is_partner_scoped(ids, platform_orm):
-    # user_a is a@partner.test on partner A; user_b is b@partner.test on partner B.
+    # partner A has 3 users on @partner.test (a/ca/ro); partner B's b@partner.test
+    # shares the domain but must be untouched.
     with platform_orm() as db:
         token_a = issue_session(db, user_id=ids.user_a, partner_id=ids.partner_a)
         count = deactivate_domain(db, ids.partner_a, "partner.test")
-        assert count == 1  # only partner A's user, despite B sharing the domain
+        assert count == 3  # all of partner A's @partner.test users, none of B's
 
         a_active = db.execute(text("SELECT is_active FROM users WHERE id = :u"),
                               {"u": str(ids.user_a)}).scalar_one()

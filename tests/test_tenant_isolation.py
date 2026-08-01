@@ -14,7 +14,7 @@ from sqlalchemy.exc import DBAPIError
 def test_partner_sees_only_its_own_companies(ids, partner_ctx):
     with partner_ctx(ids.partner_a) as conn:
         names = conn.execute(text("SELECT name FROM companies ORDER BY name")).scalars().all()
-    assert names == ["Company A"]
+    assert names == ["Company A", "Company A2"]  # both of partner A's companies
 
 
 def test_cannot_read_another_partners_row_by_id(ids, partner_ctx):
@@ -76,7 +76,7 @@ def test_activity_log_is_isolated(ids, partner_ctx):
 def test_partner_cannot_see_direct_customer_users(ids, partner_ctx):
     with partner_ctx(ids.partner_a) as conn:
         emails = conn.execute(text("SELECT email FROM users ORDER BY email")).scalars().all()
-    assert emails == ["a@partner.test"]  # not partner B's user, not the direct customer
+    assert emails == ["a@partner.test", "ca@partner.test", "ro@partner.test"]  # partner A only
 
 
 def test_platform_path_is_unchanged(ids, platform_ctx):
@@ -86,5 +86,5 @@ def test_platform_path_is_unchanged(ids, platform_ctx):
         companies = conn.execute(text("SELECT count(*) FROM companies")).scalar_one()
         direct = conn.execute(
             text("SELECT email FROM users WHERE billing_source='stripe'")).scalars().all()
-    assert companies == 2
+    assert companies == 3
     assert direct == ["direct@customer.test"]

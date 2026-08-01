@@ -69,6 +69,35 @@ path (and RLS scope) the request runs under.
 - **Workspaces** form a company-scoped parent/child tree and sit under the same
   ENABLE+FORCE RLS as the other partner tables.
 
+## RBAC & onboarding (Phase 3)
+
+**Server-side RBAC** is decided as two independent questions, kept separate so
+neither can silently widen the other:
+
+1. *Does this role grant this permission?* — a static `ROLE_PERMISSIONS` table
+   (Partner Super Admin ⊇ Company Admin ⊇ Author ⊇ Read-Only).
+2. *Does the grant's scope reach the target?* — the Phase 2 scope-inheritance
+   walk.
+
+A principal may act only where **both** hold. `enforce()` resolves the target's
+scope chain *under the caller's RLS scope*, so a target in another tenant can't
+even be named — RBAC is a second lock, not the only one. The pieces are pure and
+unit-tested; `enforce()` wires them to the DB and raises 403.
+
+**Two-step CSV onboarding:**
+
+- *Validate* parses the CSV and returns per-row errors (bad email, unknown role,
+  unknown company, duplicate-in-file, already-exists) and **writes nothing**.
+- *Commit* re-validates, then inserts every user + membership + invitation for
+  the whole batch inside a single `SAVEPOINT`. Any failure — including an email
+  that collides across tenants, which RLS hides from validation — rolls the
+  entire batch back. Never a half-onboarded partner.
+
+**Invitations** close the loop with auth: an onboarded user starts inactive with
+no password; redeeming the one-time token sets their password and activates them,
+after which the Phase 2 login flow works. Delivery is behind a pluggable
+`EmailSender` (console by default; an in-memory outbox in tests).
+
 ## Run it
 
     make up      # postgres + auto-migrate + api on :8000
@@ -92,20 +121,23 @@ Or: `docker compose up -d --build`, then `docker compose exec api pytest`.
 - **Phase 2 (done):** revocable sessions + server-resolved principal, partner
   activation/suspension (+ cascade token revocation), domain deactivation,
   workspace parent/child tree, scope-inheritance rule, Stripe-bypass decision.
-- **Phase 3:** server-side RBAC guards (Super Admin / Company Admin / Author /
-  Read-Only) on every mutation, two-step transactional CSV onboarding,
-  invitation emails.
-- **Phase 4:** activity-log API (pagination + date/event filters), branding
-  inheritance, billing-contact controls.
-- **Phase 5:** workflow-template cloning, connector checks, token-usage tracking,
-  60-day suspension retention + 1-year archiving, docs, PR, walkthrough.
+- **Phase 3 (done):** server-side RBAC (role × scope) on mutations, two-step
+  transactional CSV onboarding, invitation redemption.
+- **Phase 4 (done):** activity-log API (keyset pagination + date/event filters),
+  parent-hub branding inheritance, billing-contact controls.
+- **Phase 5 (done):** workflow-template cloning gated by connector verification,
+  monthly token-usage tracking, 60-day suspension purge + 1-year thread archival.
 
-## Known limitations (Phase 2)
+See `WALKTHROUGH.md` for the full cross-phase design narrative.
 
-- RBAC beyond the Super Admin scope-inheritance rule is not yet enforced on
-  *every* mutation; the per-endpoint Company Admin / Author / Read-Only guards
-  land in Phase 3.
+## Known limitations (Phase 3)
+
+- `users.email` is globally unique (inherited from the baseline schema), so the
+  same email can't belong to two partners. RLS hides cross-tenant rows from
+  onboarding validation, so such a collision surfaces only at commit — where the
+  SAVEPOINT rolls the batch back. Relaxing to per-partner uniqueness is a later
+  migration.
+- CSV onboarding is a Partner-Super-Admin capability (enforced at partner scope);
+  company-scoped self-service onboarding isn't wired yet.
 - `resolve_branding` demonstrates parent-hub inheritance, but the full branding
   and billing-contact API is Phase 4.
-- Data migrations that backfill FORCED tables must set `app.partner_id` (or
-  temporarily relax FORCE); noted for later data migrations.

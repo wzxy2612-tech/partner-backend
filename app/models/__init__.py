@@ -6,8 +6,12 @@ from app.models.membership import Membership
 from app.models.activity_log import PartnerActivityLog
 from app.models.session import Session
 from app.models.workspace import Workspace
+from app.models.invitation import Invitation
+from app.models.connector import Connector, WorkflowTemplate, Workflow
+from app.models.usage import TokenUsage, Thread
 
 __all__ = [
-    "Base", "Partner", "User", "Company", "Membership",
-    "PartnerActivityLog", "Session", "Workspace",
+    "Base", "Partner", "User", "Company", "Membership", "PartnerActivityLog",
+    "Session", "Workspace", "Invitation", "Connector", "WorkflowTemplate",
+    "Workflow", "TokenUsage", "Thread",
 ]
