@@ -31,11 +31,13 @@ USER_B = UUID("bbbbbbbb-0000-0000-0000-0000000000b1")
 USER_CA = UUID("aaaaaaaa-0000-0000-0000-0000000000ca")   # company_admin @ Company A
 USER_RO = UUID("aaaaaaaa-0000-0000-0000-0000000000e0")   # read_only @ Company A
 DIRECT_USER = UUID("cccccccc-0000-0000-0000-0000000000c1")
+PLATFORM_ADMIN = UUID("cccccccc-0000-0000-0000-0000000000f1")
 NIL = UUID("00000000-0000-0000-0000-000000000000")
 
 PW_A = "pw-a-secret"
 PW_DIRECT = "pw-direct-secret"
 PW_CA = "pw-ca-secret"
+PW_PLATFORM = "pw-platform-secret"
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -66,12 +68,18 @@ def ids(platform_engine):
     pw_a = hash_password(PW_A)
     pw_direct = hash_password(PW_DIRECT)
     pw_ca = hash_password(PW_CA)
+    pw_platform = hash_password(PW_PLATFORM)
     with platform_engine.begin() as c:
         for tbl in ["invitations", "partner_activity_log", "sessions", "memberships",
                     "workflows", "workflow_templates", "connectors", "token_usage",
                     "threads", "workspaces", "companies", "subscriptions", "users",
                     "partners"]:
-            c.execute(text(f"DELETE FROM {tbl}"))
+            if tbl == "partners":
+                # The platform tenant is schema, not fixture data: users and
+                # sessions FK to it and a trigger refuses its deletion.
+                c.execute(text("DELETE FROM partners WHERE id <> :nil"), {"nil": str(NIL)})
+            else:
+                c.execute(text(f"DELETE FROM {tbl}"))
         c.execute(text(
             "INSERT INTO partners (id,name,status) "
             "VALUES (:a,'Partner A','active'),(:b,'Partner B','active')"),
@@ -105,6 +113,14 @@ def ids(platform_engine):
             "(:uro,'ro@partner.test',NULL,:a,'partner')"),
             {"uca": str(USER_CA), "pwca": pw_ca, "uro": str(USER_RO), "a": str(PARTNER_A)})
         c.execute(text(
+            "INSERT INTO users (id,email,hashed_password,partner_id,billing_source) "
+            "VALUES (:up,'ops@platform.test',:pwp,:nil,'stripe')"),
+            {"up": str(PLATFORM_ADMIN), "pwp": pw_platform, "nil": str(NIL)})
+        c.execute(text(
+            "INSERT INTO memberships (user_id,partner_id,scope_type,scope_id,role) "
+            "VALUES (:up,:nil,'platform',:nil,'platform_super_admin')"),
+            {"up": str(PLATFORM_ADMIN), "nil": str(NIL)})
+        c.execute(text(
             "INSERT INTO memberships (user_id,partner_id,scope_type,scope_id,role) "
             "VALUES (:ua,:a,'partner',:a,'partner_super_admin')"),
             {"ua": str(USER_A), "a": str(PARTNER_A)})
@@ -122,7 +138,8 @@ def ids(platform_engine):
         workspace_a_parent=WORKSPACE_A_PARENT, workspace_a_child=WORKSPACE_A_CHILD,
         workspace_b=WORKSPACE_B, user_a=USER_A, user_b=USER_B, direct_user=DIRECT_USER,
         nil=NIL, pw_a=PW_A, pw_direct=PW_DIRECT,
-        company_a2=COMPANY_A2, user_ca=USER_CA, user_ro=USER_RO, pw_ca=PW_CA)
+        company_a2=COMPANY_A2, user_ca=USER_CA, user_ro=USER_RO, pw_ca=PW_CA,
+        platform_admin=PLATFORM_ADMIN, pw_platform=PW_PLATFORM)
 
 
 @pytest.fixture()

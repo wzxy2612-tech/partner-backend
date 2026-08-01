@@ -10,7 +10,15 @@ from sqlalchemy.orm import Session as OrmSession
 def purge_expired_suspensions(db: OrmSession) -> list[UUID]:
     """Hard-delete partners whose 60-day suspension retention window has passed.
     Deleting the partner cascades companies/workspaces/memberships/invitations/
-    activity; deleting its users cascades their sessions. Returns purged ids."""
+    activity; deleting its users cascades their sessions. Returns purged ids.
+
+    The users delete below is load-bearing since 0009: users.partner_id is now
+    ON DELETE RESTRICT, so the partner delete fails if any remain. That is the
+    intended direction -- a future purge path that forgets this step gets an
+    error, rather than CASCADE quietly removing accounts.
+
+    The platform tenant can never appear here: it is never suspended (guarded in
+    partners.suspend_partner) and a trigger refuses its deletion outright."""
     rows = db.execute(text(
         "SELECT id FROM partners "
         "WHERE status = 'suspended' AND suspension_retention_until IS NOT NULL "
