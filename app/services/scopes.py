@@ -27,6 +27,14 @@ ScopeNode = tuple[ScopeType, UUID]
 MAX_SCOPE_DEPTH = 32
 
 
+class CrossCompanyParent(RuntimeError):
+    """A workspace parent chain crosses a company boundary.
+
+    Impossible to create once 0012 is applied; this is the runtime backstop for
+    rows that predate it. Fail closed rather than resolving the caller against
+    a company the target does not belong to."""
+
+
 class ScopeChainTooDeep(RuntimeError):
     """A parent chain exceeded MAX_SCOPE_DEPTH -- almost certainly a cycle."""
 
@@ -56,7 +64,14 @@ def resolve_scope_chain(db: OrmSession, scope_type: ScopeType, scope_id: UUID) -
 
     if scope_type == ScopeType.workspace:
         current: UUID | None = scope_id
-        company_id = None
+        # Pinned on the FIRST row read and never reassigned. The walk used to
+        # overwrite company_id on every iteration, so the chain ended up
+        # carrying the ROOT ancestor's company instead of the target's -- which
+        # is how a Company A2 admin passed authorization on a Company A
+        # workspace hung under an A2 parent. The company a workspace belongs to
+        # is a property of that workspace, not of wherever its chain happens to
+        # terminate.
+        target_company_id: UUID | None = None
         partner_id = None
         seen: set[UUID] = set()
         # Walk parent_workspace_id up to the root of the tree.
@@ -74,10 +89,19 @@ def resolve_scope_chain(db: OrmSession, scope_type: ScopeType, scope_id: UUID) -
             if row is None:
                 break
             chain.append((ScopeType.workspace, current))
-            company_id, partner_id = row.company_id, row.partner_id
+            if target_company_id is None:
+                target_company_id = row.company_id      # first row only
+            elif row.company_id != target_company_id:
+                # 0012 makes this unreachable via the schema. Reaching it means
+                # data predating that constraint, and continuing would resolve
+                # the caller against another company -- fail closed instead.
+                raise CrossCompanyParent(
+                    f"workspace {current} is in company {row.company_id} but "
+                    f"the chain from {scope_id} started in {target_company_id}")
+            partner_id = row.partner_id
             current = row.parent_workspace_id
-        if company_id is not None:
-            chain.append((ScopeType.company, company_id))
+        if target_company_id is not None:
+            chain.append((ScopeType.company, target_company_id))
         if partner_id is not None:
             chain.append((ScopeType.partner, partner_id))
         return chain

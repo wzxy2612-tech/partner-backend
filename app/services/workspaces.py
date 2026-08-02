@@ -10,7 +10,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session as OrmSession
 
 from app.models.workspace import Workspace
-from app.services.scopes import MAX_SCOPE_DEPTH, ScopeChainTooDeep
+from app.services.scopes import (MAX_SCOPE_DEPTH, ScopeChainTooDeep,
+                                 CrossCompanyParent)
 
 
 class WorkspaceTooDeep(ValueError):
@@ -91,7 +92,17 @@ def resolve_branding(db: OrmSession, workspace_id: UUID) -> dict:
     layers: list[dict] = []
 
     current: UUID | None = workspace_id
-    company_id = None
+    # Pinned from the TARGET workspace, exactly as in resolve_scope_chain, and
+    # for a sharper reason here: company_id used to be reassigned on every
+    # iteration, so a chain crossing into another company pulled THAT company's
+    # branding into this workspace. Not merely a permission bug -- another
+    # tenant-adjacent company's brand configuration rendering inside your
+    # workspace is a quiet data leak.
+    #
+    # A cross-company parent is not an inheritance mechanism, it is invalid
+    # data. 0012 makes it unwritable; this is the runtime backstop for rows that
+    # predate it.
+    target_company_id: UUID | None = None
     seen: set[UUID] = set()
     while current is not None:
         # Same cap as the authorization walk: branding resolution follows the
@@ -108,14 +119,21 @@ def resolve_branding(db: OrmSession, workspace_id: UUID) -> dict:
         ).first()
         if row is None:
             break
+        if target_company_id is None:
+            target_company_id = row.company_id          # first row only
+        elif row.company_id != target_company_id:
+            raise CrossCompanyParent(
+                f"workspace {current} is in company {row.company_id} but the "
+                f"branding chain from {workspace_id} started in "
+                f"{target_company_id}")
         layers.append(row.branding or {})
-        company_id = row.company_id
         current = row.parent_workspace_id
 
-    if company_id is not None:
+    # The company layer is the TARGET's company, never the chain's endpoint.
+    if target_company_id is not None:
         crow = db.execute(
             text("SELECT branding FROM companies WHERE id = :id"),
-            {"id": str(company_id)},
+            {"id": str(target_company_id)},
         ).first()
         if crow is not None:
             layers.append(crow.branding or {})

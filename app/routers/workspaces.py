@@ -5,7 +5,8 @@ from pydantic import BaseModel
 
 from app.deps import require_partner, session_for_principal, enforce
 from app.services.rbac import principal_can
-from app.services.scopes import resolve_scope_chain, ScopeChainTooDeep
+from app.services.scopes import (resolve_scope_chain, ScopeChainTooDeep,
+                                 CrossCompanyParent)
 from app.auth.principal import Principal
 from app.models.enums import ScopeType
 from app.services.rbac import Permission
@@ -70,7 +71,7 @@ def index(principal: Principal = Depends(require_partner)) -> list[WorkspaceOut]
                 if principal_can(principal.grants, Permission.view,
                                  resolve_scope_chain(db, ScopeType.workspace, w.id))
             ]
-        except ScopeChainTooDeep as exc:
+        except (ScopeChainTooDeep, CrossCompanyParent) as exc:
             # A stored chain is too deep to resolve. Well-formed request, bad
             # stored state -> 409, not a 500 that hides which invariant broke.
             raise HTTPException(status.HTTP_409_CONFLICT, str(exc))

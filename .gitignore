@@ -1,9 +1,13 @@
 __pycache__/
 *.pyc
 .env
+.env.*
+!.env.example
 .pytest_cache/
 .venv/
 log/
+*.log
 WALKTHROUGH.md
 .claude/
-.doc/
+doc/
+.DS_Store

@@ -20,6 +20,9 @@ class Workspace(Base):
         # Parent-side (id, partner_id) unique so other tables' composite FKs can
         # target workspaces (0007).
         UniqueConstraint("id", "partner_id", name="uq_workspaces_id_partner"),
+        # 0012: the key the three-column parent FK targets.
+        UniqueConstraint("id", "partner_id", "company_id",
+                         name="uq_workspaces_id_partner_company"),
         # partner_id FK to partners (0002).
         ForeignKeyConstraint(
             ["partner_id"], ["partners.id"], ondelete="CASCADE",
@@ -30,10 +33,15 @@ class Workspace(Base):
             ondelete="CASCADE", name="fk_workspaces_company_id_partner"),
         # Self-referential parent, also tenant-composite; SET NULL keeps a
         # child when its parent is removed (0007).
+        # 0012 widened this to include company: a parent in another COMPANY
+        # inside the same partner was an authorization bypass, because scope
+        # resolution reported the chain root's company. Two columns were not
+        # enough.
         ForeignKeyConstraint(
-            ["parent_workspace_id", "partner_id"], ["workspaces.id", "workspaces.partner_id"],
+            ["parent_workspace_id", "partner_id", "company_id"],
+            ["workspaces.id", "workspaces.partner_id", "workspaces.company_id"],
             ondelete="SET NULL (parent_workspace_id)",
-            name="fk_workspaces_parent_workspace_id_partner"),
+            name="fk_workspaces_parent_partner_company"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

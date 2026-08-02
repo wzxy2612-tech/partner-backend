@@ -8,7 +8,7 @@ from app.auth.principal import Principal
 from app.models.enums import ScopeType
 from app.services.rbac import Permission
 from app.services import branding
-from app.services.scopes import ScopeChainTooDeep
+from app.services.scopes import ScopeChainTooDeep, CrossCompanyParent
 
 router = APIRouter(tags=["branding"])
 
@@ -24,7 +24,7 @@ def get_workspace_branding(workspace_id: UUID,
         try:
             enforce(db, principal, Permission.view, ScopeType.workspace, workspace_id)
             effective = branding.resolve_branding(db, workspace_id)
-        except ScopeChainTooDeep as exc:
+        except (ScopeChainTooDeep, CrossCompanyParent) as exc:
             raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
     return {"workspace_id": str(workspace_id), "effective": effective}
 
@@ -37,7 +37,7 @@ def set_workspace_branding(workspace_id: UUID, body: BrandingBody,
             enforce(db, principal, Permission.manage_workspaces, ScopeType.workspace, workspace_id)
             updated = branding.set_workspace_branding(db, workspace_id, body.branding)
             effective = branding.resolve_branding(db, workspace_id)
-        except ScopeChainTooDeep as exc:
+        except (ScopeChainTooDeep, CrossCompanyParent) as exc:
             raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
     return {"updated": updated, "effective": effective}
 

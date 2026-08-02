@@ -53,6 +53,20 @@ def platform_engine():
 
 
 @pytest.fixture(scope="session")
+def owner_engine():
+    """Owner connection -- the only role that can ALTER TABLE.
+
+    Exists solely so a test can construct data that PREDATES a constraint, by
+    dropping it inside a rolled-back savepoint. Nothing else should use this:
+    every other test must run as app_runtime or app_platform, because those are
+    the roles the application actually holds, and a test that quietly runs as
+    owner proves less than it appears to."""
+    eng = create_engine(OWNER_URL)
+    yield eng
+    eng.dispose()
+
+
+@pytest.fixture(scope="session")
 def runtime_engine():
     eng = create_engine(RUNTIME_URL)
     yield eng
