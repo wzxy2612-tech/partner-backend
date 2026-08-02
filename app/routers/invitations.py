@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.db import platform_session
 from app.services import onboarding
@@ -8,8 +8,11 @@ router = APIRouter(prefix="/invitations", tags=["invitations"])
 
 
 class AcceptBody(BaseModel):
+    # PBKDF2 produces a valid hash for the empty string, so "no policy" meant an
+    # invitation could be redeemed with an empty password. A floor here is the
+    # minimum; production would add breach-list and rate-limit checks too.
     token: str
-    password: str
+    password: str = Field(min_length=12, max_length=1024)
 
 
 @router.post("/accept")

@@ -24,12 +24,29 @@ SUSPENSION_RETENTION = timedelta(days=60)  # JD: 60-day suspension retention
 NIL = UUID("00000000-0000-0000-0000-000000000000")
 
 
+def _lock_partner(db: OrmSession, partner_id: UUID) -> None:
+    """Take a row lock on the partner for the rest of this transaction.
+
+    Every lifecycle transition (suspend, activate, purge) goes through here, so
+    they contend on one lock and cannot interleave. This is the piece that makes
+    "who wins" a decided question rather than a race: the loser blocks, then
+    sees the winner's committed state."""
+    db.execute(text("SELECT 1 FROM partners WHERE id = :pid FOR UPDATE"),
+               {"pid": str(partner_id)})
+
+
 def suspend_partner(db: OrmSession, partner_id: UUID) -> int:
     """Suspend a partner, stamp the 60-day retention window, and revoke every
     live session across the partner. Returns the number of sessions revoked."""
     if partner_id == NIL:
         raise ValueError("the platform tenant cannot be suspended")
     now = datetime.now(timezone.utc)
+    # Lock the row for the whole transition. suspend / activate / purge all
+    # contend for this same lock, so they serialise: whoever takes it first
+    # decides, and the others observe the committed result instead of acting on
+    # a stale read. Without it, activate and purge could both believe they had
+    # seen a suspended partner.
+    _lock_partner(db, partner_id)
     partner = db.get(Partner, partner_id)
     if partner is None:
         raise ValueError(f"partner {partner_id} not found")
@@ -46,6 +63,7 @@ def activate_partner(db: OrmSession, partner_id: UUID) -> None:
     """Reactivate a partner and clear the suspension window."""
     if partner_id == NIL:
         raise ValueError("the platform tenant has no lifecycle to activate")
+    _lock_partner(db, partner_id)
     partner = db.get(Partner, partner_id)
     if partner is None:
         raise ValueError(f"partner {partner_id} not found")

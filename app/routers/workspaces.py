@@ -5,11 +5,11 @@ from pydantic import BaseModel
 
 from app.deps import require_partner, session_for_principal, enforce
 from app.services.rbac import principal_can
-from app.services.scopes import resolve_scope_chain
+from app.services.scopes import resolve_scope_chain, ScopeChainTooDeep
 from app.auth.principal import Principal
 from app.models.enums import ScopeType
 from app.services.rbac import Permission
-from app.services.workspaces import create_workspace, list_workspaces
+from app.services.workspaces import create_workspace, list_workspaces, WorkspaceTooDeep
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
@@ -38,6 +38,8 @@ def create(body: WorkspaceBody, principal: Principal = Depends(require_partner))
                 db, partner_id=principal.partner_id, company_id=body.company_id,
                 name=body.name, parent_workspace_id=body.parent_workspace_id,
                 branding=body.branding)
+        except WorkspaceTooDeep as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
         except ValueError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
         out = WorkspaceOut(id=ws.id, company_id=ws.company_id, name=ws.name,
@@ -62,10 +64,15 @@ def index(principal: Principal = Depends(require_partner)) -> list[WorkspaceOut]
     """
     with session_for_principal(principal) as db:
         rows = list_workspaces(db)
-        visible = [
-            w for w in rows
-            if principal_can(principal.grants, Permission.view,
-                             resolve_scope_chain(db, ScopeType.workspace, w.id))
-        ]
+        try:
+            visible = [
+                w for w in rows
+                if principal_can(principal.grants, Permission.view,
+                                 resolve_scope_chain(db, ScopeType.workspace, w.id))
+            ]
+        except ScopeChainTooDeep as exc:
+            # A stored chain is too deep to resolve. Well-formed request, bad
+            # stored state -> 409, not a 500 that hides which invariant broke.
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
         return [WorkspaceOut(id=w.id, company_id=w.company_id, name=w.name,
                              parent_workspace_id=w.parent_workspace_id) for w in visible]

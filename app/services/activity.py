@@ -50,7 +50,14 @@ def _decode_cursor(cursor: str) -> tuple[datetime, str]:
     try:
         raw = base64.urlsafe_b64decode(cursor.encode()).decode()
         ts_s, id_s = raw.rsplit("|", 1)
-        return datetime.fromisoformat(ts_s), id_s
+        ts = datetime.fromisoformat(ts_s)
+        # Validate the id half too. A cursor can be valid base64 with a valid
+        # timestamp and a non-UUID tail; that used to pass here and blow up
+        # later at `cast(:c_id AS uuid)` as a DataError the router does not
+        # catch -> 500. Parsing it here folds that into the one InvalidCursor
+        # path, and returning a UUID keeps a bad value from reaching the SQL.
+        cid = UUID(id_s)
+        return ts, cid
     except Exception as exc:
         raise InvalidCursor(f"malformed cursor: {exc}") from exc
 

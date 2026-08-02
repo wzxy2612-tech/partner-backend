@@ -54,9 +54,22 @@ class Principal:
 
     @property
     def is_platform_admin(self) -> bool:
-        """Platform operator privileges. Role-derived; never inferred from the
-        absence of a tenant."""
-        return Role.platform_super_admin in self.roles
+        """Platform operator privileges.
+
+        Requires a platform_super_admin grant that is ALSO anchored to the
+        platform tuple: partner NIL, scope_type platform. 0010 enforces that
+        anchoring as a DB CHECK, so a well-formed database cannot produce a
+        partner-scoped platform_super_admin -- but the role label alone was the
+        thing a forged membership abused, so the authorization check verifies
+        the whole tuple rather than trusting the label. Absence of a tenant was
+        never evidence of privilege; neither is a role name on its own.
+        """
+        return any(
+            role == Role.platform_super_admin
+            and scope_type == ScopeType.platform
+            and self.partner_id == NIL
+            for role, (scope_type, _scope_id) in self.grants
+        )
 
     @property
     def is_suspended(self) -> bool:

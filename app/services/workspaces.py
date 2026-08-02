@@ -13,6 +13,10 @@ from app.models.workspace import Workspace
 from app.services.scopes import MAX_SCOPE_DEPTH, ScopeChainTooDeep
 
 
+class WorkspaceTooDeep(ValueError):
+    """Creating this workspace would exceed MAX_SCOPE_DEPTH."""
+
+
 def create_workspace(db: OrmSession, *, partner_id: UUID, company_id: UUID,
                      name: str, parent_workspace_id: UUID | None = None,
                      branding: dict | None = None) -> Workspace:
@@ -43,6 +47,28 @@ def create_workspace(db: OrmSession, *, partner_id: UUID, company_id: UUID,
             raise ValueError("parent workspace belongs to another partner")
         if parent.company_id != company_id:
             raise ValueError("parent workspace belongs to another company")
+
+        # Reject before creating a node whose own chain would exceed the cap.
+        # Walking the parent's ancestry here uses the same MAX_SCOPE_DEPTH the
+        # read path enforces, so the two cannot disagree about what is legal: a
+        # workspace that can be created is always one whose scope can be
+        # resolved. Counting the parent's depth and requiring room for the child
+        # means the deepest creatable chain is exactly MAX_SCOPE_DEPTH.
+        depth = 1  # the child being created
+        cur: UUID | None = parent_workspace_id
+        seen: set[UUID] = set()
+        while cur is not None:
+            if cur in seen:
+                raise ValueError("parent workspace chain contains a cycle")
+            seen.add(cur)
+            depth += 1
+            if depth > MAX_SCOPE_DEPTH:
+                raise WorkspaceTooDeep(
+                    f"parent chain would exceed MAX_SCOPE_DEPTH ({MAX_SCOPE_DEPTH})")
+            row = db.execute(text(
+                "SELECT parent_workspace_id FROM workspaces WHERE id = :id"),
+                {"id": str(cur)}).first()
+            cur = row.parent_workspace_id if row else None
 
     ws = Workspace(
         partner_id=partner_id, company_id=company_id, name=name,

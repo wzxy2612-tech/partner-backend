@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from app.deps import require_partner, session_for_principal, enforce
@@ -8,6 +8,7 @@ from app.auth.principal import Principal
 from app.models.enums import ScopeType
 from app.services.rbac import Permission
 from app.services import branding
+from app.services.scopes import ScopeChainTooDeep
 
 router = APIRouter(tags=["branding"])
 
@@ -20,8 +21,11 @@ class BrandingBody(BaseModel):
 def get_workspace_branding(workspace_id: UUID,
                            principal: Principal = Depends(require_partner)) -> dict:
     with session_for_principal(principal) as db:
-        enforce(db, principal, Permission.view, ScopeType.workspace, workspace_id)
-        effective = branding.resolve_branding(db, workspace_id)
+        try:
+            enforce(db, principal, Permission.view, ScopeType.workspace, workspace_id)
+            effective = branding.resolve_branding(db, workspace_id)
+        except ScopeChainTooDeep as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
     return {"workspace_id": str(workspace_id), "effective": effective}
 
 
@@ -29,9 +33,12 @@ def get_workspace_branding(workspace_id: UUID,
 def set_workspace_branding(workspace_id: UUID, body: BrandingBody,
                            principal: Principal = Depends(require_partner)) -> dict:
     with session_for_principal(principal) as db:
-        enforce(db, principal, Permission.manage_workspaces, ScopeType.workspace, workspace_id)
-        updated = branding.set_workspace_branding(db, workspace_id, body.branding)
-        effective = branding.resolve_branding(db, workspace_id)
+        try:
+            enforce(db, principal, Permission.manage_workspaces, ScopeType.workspace, workspace_id)
+            updated = branding.set_workspace_branding(db, workspace_id, body.branding)
+            effective = branding.resolve_branding(db, workspace_id)
+        except ScopeChainTooDeep as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
     return {"updated": updated, "effective": effective}
 
 
