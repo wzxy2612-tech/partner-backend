@@ -53,6 +53,25 @@ def upgrade() -> None:
     conn = op.get_bind()
 
     # --- 1. the platform tenant, as an actual row -------------------------
+    #
+    # partners has FORCE ROW LEVEL SECURITY (0002), so its self-isolation policy
+    # -- id = current_setting('app.partner_id') -- applies to the migration's
+    # owner role too. That FORCE is correct and is left untouched: the whole
+    # point of forcing it is that not even the owner may reach across tenants,
+    # and relaxing it here to make one INSERT convenient would be exactly the
+    # "loosen the adjudicator so the write succeeds" move this schema is built
+    # to reject. (The first cut of this migration hit precisely that wall, which
+    # is FORCE doing its job.)
+    #
+    # The row is not an exception to the policy; it satisfies it. Setting the
+    # scope to NIL makes the check `id = NIL` true for exactly this row, and NIL
+    # is the tenant this row legitimately belongs to. This is the same context
+    # the platform path runs under -- the migration reaches it via the GUC
+    # because it holds an owner connection rather than the app's BYPASSRLS
+    # platform connection, not by carving out a hole.
+    #
+    # SET LOCAL: scoped to this migration's transaction, discarded on commit.
+    op.execute(f"SET LOCAL app.partner_id = '{NIL}'")
     op.execute(f"""
         INSERT INTO partners (id, name, status)
         VALUES ('{NIL}'::uuid, 'Platform', 'active')
