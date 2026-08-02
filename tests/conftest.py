@@ -114,7 +114,7 @@ def ids(platform_engine):
             {"uca": str(USER_CA), "pwca": pw_ca, "uro": str(USER_RO), "a": str(PARTNER_A)})
         c.execute(text(
             "INSERT INTO users (id,email,hashed_password,partner_id,billing_source) "
-            "VALUES (:up,'ops@platform.test',:pwp,:nil,'stripe')"),
+            "VALUES (:up,'ops@platform.test',:pwp,:nil,'partner')"),
             {"up": str(PLATFORM_ADMIN), "pwp": pw_platform, "nil": str(NIL)})
         c.execute(text(
             "INSERT INTO memberships (user_id,partner_id,scope_type,scope_id,role) "

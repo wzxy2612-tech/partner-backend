@@ -1,0 +1,36 @@
+api-1  | Traceback (most recent call last):
+api-1  |   File "/usr/local/bin/alembic", line 8, in <module>
+api-1  |     sys.exit(main())
+api-1  |              ^^^^^^
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/config.py", line 1047, in main
+api-1  |     CommandLine(prog=prog).main(argv=argv)
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/config.py", line 1037, in main
+api-1  |     self.run_cmd(cfg, options)
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/config.py", line 971, in run_cmd
+api-1  |     fn(
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/command.py", line 490, in upgrade
+api-1  |     script.run_env()
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/script/base.py", line 556, in run_env
+api-1  |     util.load_python_file(self.dir, "env.py")
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/util/pyfiles.py", line 116, in load_python_file
+api-1  |     module = load_module_py(module_id, path)
+api-1  |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/util/pyfiles.py", line 136, in load_module_py
+api-1  |     spec.loader.exec_module(module)  # type: ignore
+api-1  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+api-1  |   File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+api-1  |   File "/app/alembic/env.py", line 45, in <module>
+api-1  |     run_migrations_online()
+api-1  |   File "/app/alembic/env.py", line 39, in run_migrations_online
+api-1  |     context.run_migrations()
+api-1  |   File "<string>", line 8, in run_migrations
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/runtime/environment.py", line 969, in run_migrations
+api-1  |     self.get_context().run_migrations(**kw)
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/runtime/migration.py", line 626, in run_migrations
+api-1  |     step.migration_fn(**kw)
+api-1  |   File "/app/alembic/versions/0009_platform_tenant.py", line 97, in upgrade
+api-1  |     raise RuntimeError(
+api-1  | RuntimeError: 0009 preflight: rows point at a partner with no row. These have been unconstrained until now, so they may be real orphans from a deleted partner; decide what they should become rather than letting the migration guess:
+api-1  |   users: 3 row(s) reference partner 11111111-1111-1111-1111-111111111111, which does not exist
+api-1  |   users: 1 row(s) reference partner 22222222-2222-2222-2222-222222222222, which does not exist

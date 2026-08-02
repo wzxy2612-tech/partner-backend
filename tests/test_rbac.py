@@ -37,8 +37,19 @@ def test_partner_super_admin_reaches_everything_in_partner():
     assert principal_can(grants, Permission.manage_users, CHAIN_WS)
 
 
-def test_platform_bypasses_all():
-    assert principal_can([], Permission.manage_companies, CHAIN_WS, is_platform=True)
+def test_platform_super_admin_grant_bypasses_scope():
+    """A REAL platform grant reaches any target. Previously this asserted that
+    an empty grant list plus an `is_platform=True` flag was allowed -- which is
+    what let every tenant-less (direct) customer pass every check."""
+    grants = [(Role.platform_super_admin, (ScopeType.platform, None))]
+    assert principal_can(grants, Permission.manage_companies, CHAIN_WS)
+
+
+def test_no_grants_is_denied_even_without_a_tenant():
+    """Regression guard for the collapsed flag: having no tenant is not a
+    privilege. There is no longer any argument to principal_can that can turn
+    an empty grant list into an allow."""
+    assert not principal_can([], Permission.manage_companies, CHAIN_WS)
 
 
 def test_no_grant_is_denied():

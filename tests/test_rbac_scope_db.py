@@ -13,7 +13,7 @@ def _principal_for(db, user_id, partner_id):
 def test_company_admin_grant_is_scoped_to_its_company(ids, platform_orm):
     with platform_orm() as db:
         p = _principal_for(db, ids.user_ca, ids.partner_a)
-    assert p.is_platform is False
+    assert p.is_platform_path is False
     assert (Role.company_admin, (ScopeType.company, ids.company_a)) in p.grants
 
 

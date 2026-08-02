@@ -41,3 +41,24 @@ def test_partner_super_admin_reaches_workspace():
 def test_no_covering_grant_is_denied():
     grants = [(Role.company_admin, (ScopeType.company, uuid4()))]
     assert not principal_can_access(grants, CHAIN)
+
+
+# --- cycle / depth backstop (audit #5) --------------------------------------
+
+def test_depth_cap_is_below_python_recursion_and_above_real_nesting():
+    """The cap has to sit in a specific window: high enough that no legitimate
+    hub tree reaches it, low enough that a cycle is caught long before the walk
+    becomes a request-time hang."""
+    from app.services.scopes import MAX_SCOPE_DEPTH
+    assert 8 <= MAX_SCOPE_DEPTH <= 128
+
+
+def test_both_parent_walks_share_one_cap():
+    """Scope resolution and branding resolution follow the SAME parent chain.
+    Two separate limits would be two answers to one question and would drift;
+    branding imports the constant rather than redefining it."""
+    import inspect
+    from app.services import workspaces, scopes
+    src = inspect.getsource(workspaces.resolve_branding)
+    assert "MAX_SCOPE_DEPTH" in src
+    assert workspaces.MAX_SCOPE_DEPTH is scopes.MAX_SCOPE_DEPTH

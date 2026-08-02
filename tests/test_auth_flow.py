@@ -13,16 +13,24 @@ def test_login_resolves_partner_principal(ids, platform_orm):
     assert p is not None
     assert p.user_id == ids.user_a
     assert p.partner_id == ids.partner_a
-    assert p.is_platform is False
+    assert p.is_platform_path is False
     assert p.partner_status == PartnerStatus.active
     assert p.has_role(Role.partner_super_admin)
 
 
-def test_direct_user_resolves_as_platform(ids, platform_orm):
+def test_direct_user_is_on_platform_path_but_is_not_an_admin(ids, platform_orm):
+    """A direct (Stripe) customer has no tenant, so it routes onto the platform
+    DB path -- and that is ALL it means. It previously also made them a platform
+    operator, because one boolean carried both facts.
+
+    This test used to assert only the first half; asserting the second half is
+    what turns the fix into a regression guard."""
     with platform_orm() as db:
         token = issue_session(db, user_id=ids.direct_user, partner_id=ids.nil)
         p = authenticate(db, token)
-    assert p is not None and p.is_platform is True
+    assert p is not None
+    assert p.is_platform_path is True      # routing fact
+    assert p.is_platform_admin is False    # authorization fact
     assert p.partner_status is None
 
 

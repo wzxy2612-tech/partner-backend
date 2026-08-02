@@ -1,0 +1,88 @@
+api-1  | Traceback (most recent call last):
+api-1  |   File "/usr/local/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1969, in _exec_single_context
+api-1  |     self.dialect.do_execute(
+api-1  |   File "/usr/local/lib/python3.12/site-packages/sqlalchemy/engine/default.py", line 952, in do_execute
+api-1  |     cursor.execute(statement, parameters)
+api-1  |   File "/usr/local/lib/python3.12/site-packages/psycopg/cursor.py", line 117, in execute
+api-1  |     raise ex.with_traceback(None)
+api-1  | psycopg.errors.InsufficientPrivilege: new row violates row-level security policy for table "partners"
+api-1  | 
+api-1  | The above exception was the direct cause of the following exception:
+api-1  | 
+api-1  | Traceback (most recent call last):
+api-1  |   File "/usr/local/bin/alembic", line 8, in <module>
+api-1  |     sys.exit(main())
+api-1  |              ^^^^^^
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/config.py", line 1047, in main
+api-1  |     CommandLine(prog=prog).main(argv=argv)
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/config.py", line 1037, in main
+api-1  |     self.run_cmd(cfg, options)
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/config.py", line 971, in run_cmd
+api-1  |     fn(
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/command.py", line 490, in upgrade
+api-1  |     script.run_env()
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/script/base.py", line 556, in run_env
+api-1  |     util.load_python_file(self.dir, "env.py")
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/util/pyfiles.py", line 116, in load_python_file
+api-1  |     module = load_module_py(module_id, path)
+api-1  |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/util/pyfiles.py", line 136, in load_module_py
+api-1  |     spec.loader.exec_module(module)  # type: ignore
+api-1  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+api-1  |   File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+api-1  |   File "/app/alembic/env.py", line 45, in <module>
+api-1  |     run_migrations_online()
+api-1  |   File "/app/alembic/env.py", line 39, in run_migrations_online
+api-1  |     context.run_migrations()
+api-1  |   File "<string>", line 8, in run_migrations
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/runtime/environment.py", line 969, in run_migrations
+api-1  |     self.get_context().run_migrations(**kw)
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/runtime/migration.py", line 626, in run_migrations
+api-1  |     step.migration_fn(**kw)
+api-1  |   File "/app/alembic/versions/0009_platform_tenant.py", line 56, in upgrade
+api-1  |     op.execute(f"""
+api-1  |   File "<string>", line 8, in execute
+api-1  |   File "<string>", line 3, in execute
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/operations/ops.py", line 2667, in execute
+api-1  |     return operations.invoke(op)
+api-1  |            ^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/operations/base.py", line 452, in invoke
+api-1  |     return fn(self, operation)
+api-1  |            ^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/operations/toimpl.py", line 259, in execute_sql
+api-1  |     operations.migration_context.impl.execute(
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/ddl/impl.py", line 263, in execute
+api-1  |     self._exec(sql, execution_options)
+api-1  |   File "/usr/local/lib/python3.12/site-packages/alembic/ddl/impl.py", line 256, in _exec
+api-1  |     return conn.execute(construct, params)
+api-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1421, in execute
+api-1  |     return meth(
+api-1  |            ^^^^^
+api-1  |   File "/usr/local/lib/python3.12/site-packages/sqlalchemy/sql/elements.py", line 526, in _execute_on_connection
+api-1  |     return connection._execute_clauseelement(
+api-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1643, in _execute_clauseelement
+api-1  |     ret = self._execute_context(
+api-1  |           ^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1848, in _execute_context
+api-1  |     return self._exec_single_context(
+api-1  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+api-1  |   File "/usr/local/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1988, in _exec_single_context
+api-1  |     self._handle_dbapi_exception(
+api-1  |   File "/usr/local/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 2365, in _handle_dbapi_exception
+api-1  |     raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+api-1  |   File "/usr/local/lib/python3.12/site-packages/sqlalchemy/engine/base.py", line 1969, in _exec_single_context
+api-1  |     self.dialect.do_execute(
+api-1  |   File "/usr/local/lib/python3.12/site-packages/sqlalchemy/engine/default.py", line 952, in do_execute
+api-1  |     cursor.execute(statement, parameters)
+api-1  |   File "/usr/local/lib/python3.12/site-packages/psycopg/cursor.py", line 117, in execute
+api-1  |     raise ex.with_traceback(None)
+api-1  | sqlalchemy.exc.ProgrammingError: (psycopg.errors.InsufficientPrivilege) new row violates row-level security policy for table "partners"
+api-1  | [SQL: 
+api-1  |         INSERT INTO partners (id, name, status)
+api-1  |         VALUES ('00000000-0000-0000-0000-000000000000'::uuid, 'Platform', 'active')
+api-1  |         ON CONFLICT (id) DO NOTHING
+api-1  |     ]
+api-1  | (Background on this error at: https://sqlalche.me/e/20/f405)
