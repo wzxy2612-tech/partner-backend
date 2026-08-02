@@ -3,8 +3,12 @@ period's counter; monthly_usage reads it back (RLS-scoped)."""
 from datetime import datetime, timezone
 from uuid import UUID
 
+import re
+
 from sqlalchemy import text
 from sqlalchemy.orm import Session as OrmSession
+
+PERIOD_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
 def current_period(now: datetime | None = None) -> str:
@@ -13,7 +17,23 @@ def current_period(now: datetime | None = None) -> str:
 
 def record_usage(db: OrmSession, partner_id: UUID, tokens: int,
                  period: str | None = None) -> None:
+    """Add ``tokens`` to a partner's counter for ``period``.
+
+    Metering is append-only: a negative delta is a bug in the caller, not a
+    credit. Deductions, if they are ever needed, belong in a separate ledger
+    entry with its own reason -- not as a negative write to a running total that
+    nothing can reconstruct afterwards.
+
+    0008 also enforces both of these as CHECK constraints. The duplication is
+    intentional and is not two authorities disagreeing: the constraint is the
+    adjudicator, and this raises a useful error before the round trip instead of
+    surfacing a bare IntegrityError.
+    """
     period = period or current_period()
+    if tokens < 0:
+        raise ValueError(f"tokens must be non-negative, got {tokens}")
+    if not PERIOD_RE.match(period):
+        raise ValueError(f"period must be YYYY-MM with a real month, got {period!r}")
     db.execute(text(
         "INSERT INTO token_usage (partner_id, period, tokens) VALUES (:p, :period, :t) "
         "ON CONFLICT (partner_id, period) "

@@ -134,9 +134,10 @@ def provision(db: OrmSession, partner_id: UUID, report: ValidationReport,
         for r in report.valid_rows:
             user_id = uuid4()
             db.execute(text(
-                "INSERT INTO users (id, email, partner_id, billing_source, is_active) "
-                "VALUES (:id, :email, :pid, 'partner', false)"),
-                {"id": str(user_id), "email": r.email, "pid": str(partner_id)})
+                "INSERT INTO users (id, email, name, partner_id, billing_source, is_active) "
+                "VALUES (:id, :email, :name, :pid, 'partner', false)"),
+                {"id": str(user_id), "email": r.email, "name": r.name,
+                 "pid": str(partner_id)})
             db.execute(text(
                 "INSERT INTO memberships (user_id, partner_id, scope_type, scope_id, role) "
                 "VALUES (:uid, :pid, 'company', :cid, :role)"),
@@ -169,14 +170,22 @@ def onboard(db: OrmSession, partner_id: UUID, raw_csv: str,
 
 def accept_invitation(db: OrmSession, token: str, password: str) -> bool:
     """Redeem an invitation: set the user's password, activate them, mark accepted.
-    Returns False if the token is unknown, already used, or expired."""
-    inv = db.execute(text(
-        "SELECT id, user_id, status, expires_at FROM invitations WHERE token_hash = :h"),
+    Returns False if the token is unknown, already used, or expired.
+
+    The status transition IS the claim. This used to SELECT the invitation,
+    decide it was pending, then unconditionally UPDATE -- so two concurrent
+    redemptions of a one-time invite could both observe `pending` and both
+    proceed, leaving whichever password landed second. A single conditional
+    UPDATE moves the decision into the row lock: exactly one caller can see a
+    row transition out of `pending`, and only that caller gets a returned row.
+    """
+    claimed = db.execute(text(
+        "UPDATE invitations SET status = 'accepted', accepted_at = now() "
+        "WHERE token_hash = :h AND status = 'pending' AND expires_at > now() "
+        "RETURNING user_id"),
         {"h": hash_token(token)}).first()
-    if inv is None or inv.status != "pending" or inv.expires_at <= datetime.now(timezone.utc):
+    if claimed is None:
         return False
     db.execute(text("UPDATE users SET hashed_password = :pw, is_active = true WHERE id = :u"),
-               {"pw": hash_password(password), "u": str(inv.user_id)})
-    db.execute(text("UPDATE invitations SET status = 'accepted', accepted_at = now() WHERE id = :i"),
-               {"i": str(inv.id)})
+               {"pw": hash_password(password), "u": str(claimed.user_id)})
     return True

@@ -30,12 +30,33 @@ Grant = tuple[Role, tuple[ScopeType, UUID]]
 
 @dataclass
 class Principal:
+    """Two facts that used to be one field, and must never be conflated again.
+
+    ``is_platform_path`` is a ROUTING fact: this principal has no tenant, so its
+    queries run on the bypass connection instead of the RLS-scoped one. Every
+    direct (Stripe) customer is on the platform path.
+
+    ``is_platform_admin`` is an AUTHORIZATION fact: this principal may operate
+    the platform -- suspend partners, deactivate by domain, run cross-tenant
+    retention jobs. It is derived from a granted role and nothing else.
+
+    Collapsing these into one boolean is what made every direct customer a
+    platform operator (they share the nil-UUID tenant, which is the routing
+    fact, not the authorization one). The nil sentinel is a fine simplification
+    in the DATA layer; it must not leak into the AUTHORIZATION layer.
+    """
     user_id: UUID
     partner_id: UUID
-    is_platform: bool
+    is_platform_path: bool
     roles: list[Role] = field(default_factory=list)
     grants: list[Grant] = field(default_factory=list)
     partner_status: PartnerStatus | None = None
+
+    @property
+    def is_platform_admin(self) -> bool:
+        """Platform operator privileges. Role-derived; never inferred from the
+        absence of a tenant."""
+        return Role.platform_super_admin in self.roles
 
     @property
     def is_suspended(self) -> bool:
@@ -60,14 +81,23 @@ def authenticate(db: OrmSession, token: str | None) -> Principal | None:
         return None
 
     partner_id = user.partner_id
-    is_platform = partner_id == NIL
+    # Routing only: no tenant -> platform DB path. Says nothing about privilege.
+    is_platform_path = partner_id == NIL
     partner_status = None
-    if not is_platform:
+    if not is_platform_path:
         partner = db.get(Partner, partner_id)
         partner_status = partner.status if partner else None
+
+    # A session must belong to the same tenant as its user. These are separate
+    # columns with separate constraints, so a row could disagree; if it does,
+    # refuse rather than trusting either side. 0007 makes this unreachable via
+    # a composite FK -- this check is the fail-closed backstop for rows that
+    # predate it, and it is cheap.
+    if row.partner_id != user.partner_id:
+        return None
 
     memberships = db.query(Membership).filter(Membership.user_id == user.id).all()
     roles = [m.role for m in memberships]
     grants: list[Grant] = [(m.role, (m.scope_type, m.scope_id)) for m in memberships]
-    return Principal(user_id=user.id, partner_id=partner_id, is_platform=is_platform,
+    return Principal(user_id=user.id, partner_id=partner_id, is_platform_path=is_platform_path,
                      roles=roles, grants=grants, partner_status=partner_status)

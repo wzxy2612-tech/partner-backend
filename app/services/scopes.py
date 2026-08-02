@@ -15,6 +15,21 @@ from app.models.enums import Role, ScopeType
 # A node in a scope chain, e.g. (ScopeType.company, <company_id>).
 ScopeNode = tuple[ScopeType, UUID]
 
+# Hard ceiling on any parent-chain walk.
+#
+# Validating at write time that a new parent introduces no cycle is fail-OPEN:
+# it holds only as long as every present and future write path remembers to
+# call it, and one that forgets produces a chain that never terminates -- inside
+# the authorization path, on every request. This cap is the fail-CLOSED half. It
+# does not care how a cycle arrived; it refuses to loop.
+#
+# 32 is far past any real hub nesting, so hitting it means the data is wrong.
+MAX_SCOPE_DEPTH = 32
+
+
+class ScopeChainTooDeep(RuntimeError):
+    """A parent chain exceeded MAX_SCOPE_DEPTH -- almost certainly a cycle."""
+
 
 def membership_covers(membership_scope: ScopeNode, target_chain: list[ScopeNode]) -> bool:
     """True if a membership granted at ``membership_scope`` reaches a target whose
@@ -43,8 +58,14 @@ def resolve_scope_chain(db: OrmSession, scope_type: ScopeType, scope_id: UUID) -
         current: UUID | None = scope_id
         company_id = None
         partner_id = None
+        seen: set[UUID] = set()
         # Walk parent_workspace_id up to the root of the tree.
         while current is not None:
+            if current in seen or len(seen) >= MAX_SCOPE_DEPTH:
+                raise ScopeChainTooDeep(
+                    f"workspace parent chain from {scope_id} cycles or exceeds "
+                    f"{MAX_SCOPE_DEPTH}; refusing to resolve authorization scope")
+            seen.add(current)
             row = db.execute(
                 text("SELECT parent_workspace_id, company_id, partner_id "
                      "FROM workspaces WHERE id = :id"),

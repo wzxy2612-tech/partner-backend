@@ -34,10 +34,25 @@ def _encode_cursor(created_at: datetime, row_id: UUID) -> str:
     return base64.urlsafe_b64encode(f"{created_at.isoformat()}|{row_id}".encode()).decode()
 
 
+class InvalidCursor(ValueError):
+    """A client-supplied cursor that could not be decoded."""
+
+
 def _decode_cursor(cursor: str) -> tuple[datetime, str]:
-    raw = base64.urlsafe_b64decode(cursor.encode()).decode()
-    ts_s, id_s = raw.rsplit("|", 1)
-    return datetime.fromisoformat(ts_s), id_s
+    """Decode an opaque keyset cursor.
+
+    Every failure mode here is client input, not a server fault: bad base64,
+    non-UTF-8 bytes, a missing separator, an unparseable timestamp. They used to
+    escape as whatever exception the parser happened to raise and surface as
+    500. One narrow exception type lets the router answer 422 without catching
+    unrelated bugs along with it.
+    """
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode()).decode()
+        ts_s, id_s = raw.rsplit("|", 1)
+        return datetime.fromisoformat(ts_s), id_s
+    except Exception as exc:
+        raise InvalidCursor(f"malformed cursor: {exc}") from exc
 
 
 def query(db: OrmSession, *, event_type: str | None = None,

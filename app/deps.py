@@ -36,19 +36,28 @@ def get_principal(authorization: str | None = Header(default=None)) -> Principal
     if principal is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid or expired token")
     # A suspended partner's users can authenticate but cannot act.
-    if not principal.is_platform and principal.is_suspended:
+    if not principal.is_platform_path and principal.is_suspended:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "partner is suspended")
     return principal
 
 
 def require_platform(principal: Principal = Depends(get_principal)) -> Principal:
-    if principal.is_platform or principal.has_role(Role.platform_super_admin):
+    """Platform operator endpoints: suspend/activate a partner, deactivate by
+    domain, run cross-tenant retention jobs.
+
+    Gated on the GRANTED ROLE only. It previously also admitted anyone whose
+    `is_platform` flag was set -- but that flag meant "has no tenant", which is
+    true of every direct Stripe customer. Any paying direct customer could
+    suspend arbitrary partners and run cross-tenant jobs. Absence of a tenant is
+    not evidence of privilege.
+    """
+    if principal.is_platform_admin:
         return principal
     raise HTTPException(status.HTTP_403_FORBIDDEN, "platform privileges required")
 
 
 def require_partner(principal: Principal = Depends(get_principal)) -> Principal:
-    if principal.is_platform:
+    if principal.is_platform_path:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "a partner context is required")
     return principal
 
@@ -57,7 +66,7 @@ def require_partner(principal: Principal = Depends(get_principal)) -> Principal:
 def session_for_principal(principal: Principal) -> Iterator[OrmSession]:
     """Open the DB path that matches the principal: the RLS-scoped runtime path
     for a partner, the bypass path for platform/direct principals."""
-    if principal.is_platform:
+    if principal.is_platform_path:
         with platform_session() as db:
             yield db
     else:
@@ -71,7 +80,7 @@ def enforce(db: OrmSession, principal: Principal, permission: Permission,
     scope. The scope chain is resolved under the caller's RLS scope, so a target
     in another tenant simply can't be reached (defense in depth)."""
     chain = resolve_scope_chain(db, scope_type, scope_id)
-    if not principal_can(principal.grants, permission, chain, principal.is_platform):
+    if not principal_can(principal.grants, permission, chain):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             f"missing permission '{permission.value}' at {scope_type.value}")

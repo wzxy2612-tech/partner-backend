@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.deps import require_partner, session_for_principal, enforce
 from app.auth.principal import Principal
@@ -23,8 +23,11 @@ def list_activity(
     # view at PARTNER scope -> only a Partner Super Admin's grant reaches it.
     with session_for_principal(principal) as db:
         enforce(db, principal, Permission.view, ScopeType.partner, principal.partner_id)
-        rows, next_cursor = activity.query(
-            db, event_type=event_type, start=start, end=end, limit=limit, cursor=cursor)
+        try:
+            rows, next_cursor = activity.query(
+                db, event_type=event_type, start=start, end=end, limit=limit, cursor=cursor)
+        except activity.InvalidCursor as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
         items = [{
             "id": str(r.id),
             "event_type": r.event_type,

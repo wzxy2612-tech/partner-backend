@@ -43,11 +43,17 @@ def role_has(role: Role, permission: Permission) -> bool:
 
 
 def principal_can(grants: list[Grant], permission: Permission,
-                  target_chain: list[ScopeNode], is_platform: bool = False) -> bool:
+                  target_chain: list[ScopeNode]) -> bool:
     """True if any grant both carries ``permission`` and is scoped at or above the
-    target (whose ancestry, most specific -> partner root, is ``target_chain``)."""
-    if is_platform:
-        return True
+    target (whose ancestry, most specific -> partner root, is ``target_chain``).
+
+    Authorization is decided from GRANTS ONLY. There used to be an
+    ``is_platform`` parameter here that returned True unconditionally; callers
+    passed the principal's "has no tenant" routing flag into it, so every direct
+    customer passed every permission check. A platform operator is still
+    allowed everywhere -- but via a real ``platform_super_admin`` grant, checked
+    in the loop below, not by lacking a tenant.
+    """
     for role, scope in grants:
         if role == Role.platform_super_admin:
             return True

@@ -10,11 +10,40 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session as OrmSession
 
 from app.models.workspace import Workspace
+from app.services.scopes import MAX_SCOPE_DEPTH, ScopeChainTooDeep
 
 
 def create_workspace(db: OrmSession, *, partner_id: UUID, company_id: UUID,
                      name: str, parent_workspace_id: UUID | None = None,
                      branding: dict | None = None) -> Workspace:
+    """Create a workspace, validating the parent it is being hung under.
+
+    Only company_id used to be authorized; parent_workspace_id was written
+    straight through. Because scope resolution walks UP from a workspace and
+    overwrites company_id with each ancestor's, hanging a Company A workspace
+    under a Company A2 parent made it authorize -- and inherit branding -- as
+    Company A2. A Company A2 admin could reach a workspace that belongs to
+    Company A.
+
+    NOTE (product decision, not a schema fact): this requires the parent to be
+    in the SAME company. If a parent hub is ever meant to be shared across
+    sibling companies, relax this check -- but then scope resolution must stop
+    overwriting company_id on the way up, or the same escalation returns.
+    Crossing PARTNERS is refused by the composite FK in 0007 regardless.
+    """
+    if parent_workspace_id is not None:
+        parent = db.execute(text(
+            "SELECT partner_id, company_id FROM workspaces WHERE id = :id"),
+            {"id": str(parent_workspace_id)}).first()
+        # RLS already hides other partners' rows, so None here means "absent, or
+        # not yours". Both are refused identically and without distinguishing.
+        if parent is None:
+            raise ValueError("parent workspace not found")
+        if parent.partner_id != partner_id:
+            raise ValueError("parent workspace belongs to another partner")
+        if parent.company_id != company_id:
+            raise ValueError("parent workspace belongs to another company")
+
     ws = Workspace(
         partner_id=partner_id, company_id=company_id, name=name,
         parent_workspace_id=parent_workspace_id, branding=branding or {})
@@ -37,7 +66,15 @@ def resolve_branding(db: OrmSession, workspace_id: UUID) -> dict:
 
     current: UUID | None = workspace_id
     company_id = None
+    seen: set[UUID] = set()
     while current is not None:
+        # Same cap as the authorization walk: branding resolution follows the
+        # identical parent chain and would hang on the identical cycle.
+        if current in seen or len(seen) >= MAX_SCOPE_DEPTH:
+            raise ScopeChainTooDeep(
+                f"workspace parent chain from {workspace_id} cycles or exceeds "
+                f"{MAX_SCOPE_DEPTH}")
+        seen.add(current)
         row = db.execute(
             text("SELECT parent_workspace_id, company_id, branding "
                  "FROM workspaces WHERE id = :id"),
