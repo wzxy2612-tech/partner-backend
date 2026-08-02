@@ -18,7 +18,7 @@ BAD_CSV = (
     "dave@x.test,Dave,author,Nowhere Co\n"      # 3: unknown company
     "eve@x.test,Eve,author,Company A\n"         # 4: valid
     "eve@x.test,Eve,read_only,Company A\n"      # 5: duplicate within file
-    "a@partner.test,Existing,author,Company A\n"  # 6: email already exists
+    "a@partner.test,Existing,author,Company A\n"  # 6: email already registered
 )
 
 
@@ -42,7 +42,11 @@ def test_validate_flags_every_bad_row(ids, partner_orm):
     assert any("unknown company" in e for e in errs[3])
     assert errs[4] == []                                   # first eve is fine
     assert any("duplicate" in e for e in errs[5])
-    assert any("already exists" in e for e in errs[6])
+    # Wording is "already registered", identical whether the address belongs to
+    # this partner, another partner, or a direct customer -- the old
+    # "already exists for this partner" told the caller which, turning the
+    # endpoint into an enumeration oracle for other tenants' customer lists.
+    assert any("already registered" in e for e in errs[6])
 
 
 def test_commit_provisions_users_memberships_invites(ids, partner_orm):

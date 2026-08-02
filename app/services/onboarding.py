@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as OrmSession
 
 from app.auth.tokens import new_token, hash_token
@@ -73,11 +74,49 @@ def parse_csv(raw: str) -> list[dict]:
     return [{(k or "").strip().lower(): (v or "").strip() for k, v in row.items()} for row in reader]
 
 
-def validate(db: OrmSession, rows: list[dict]) -> ValidationReport:
+# Emails are globally unique (users.email UNIQUE, from the 0001 baseline), but
+# the partner path can only SEE its own tenant. So validate used to pass a row
+# whose email already belonged to another partner -- or to a direct customer --
+# and the conflict only surfaced as an IntegrityError at INSERT time, after the
+# batch had already started and (until the outbox round) after mail had gone out.
+#
+# The check therefore has to run somewhere the whole table is visible, i.e. the
+# platform path. That immediately creates a second problem: an endpoint that
+# reports "this email exists" across tenants is an enumeration oracle -- partner
+# A could probe for partner B's customers one address at a time.
+#
+# The narrowing is: this returns ONLY the subset of the asked-about addresses
+# that are taken, and nothing about WHO holds them. The caller already knows the
+# addresses (it supplied them), so the only new information is a boolean per
+# address -- the minimum needed to report a row error at all. Which tenant, or
+# whether it is a direct customer, never leaves this function.
+def taken_emails(pdb: OrmSession, emails: set[str]) -> set[str]:
+    """Which of these addresses already exist, system-wide. Booleans only.
+
+    Takes the platform session as an argument rather than opening one. An
+    earlier cut had validate() open its own platform_session internally, which
+    meant a read-only precheck quietly held a second connection -- and, on the
+    commit path, opened it inside the caller's business transaction and
+    COMMITTED it on exit. Passing the session in keeps the connection lifetime
+    with whoever owns the request, and makes validate() testable without a pool.
+    """
+    if not emails:
+        return set()
+    return {e.lower() for (e,) in pdb.execute(
+        text("SELECT email FROM users WHERE lower(email) = ANY(:list)"),
+        {"list": sorted(emails)})}
+
+
+def validate(db: OrmSession, rows: list[dict],
+             globally_taken: set[str] | None = None) -> ValidationReport:
     # RLS scopes both lookups to the caller's partner.
     companies = {name.lower(): cid
                  for cid, name in db.execute(text("SELECT id, name FROM companies"))}
     existing = {e.lower() for (e,) in db.execute(text("SELECT email FROM users"))}
+    # Cross-tenant existence, resolved by the caller on the platform path.
+    # Defaults to empty so the partner-visible checks still work standalone;
+    # the router always supplies it.
+    globally_taken = globally_taken or set()
 
     seen: set[str] = set()
     report = ValidationReport()
@@ -110,13 +149,51 @@ def validate(db: OrmSession, rows: list[dict]) -> ValidationReport:
         if email:
             if email in seen:
                 errors.append("duplicate email within file")
-            elif email in existing:
-                errors.append("email already exists for this partner")
+            elif email in existing or email in globally_taken:
+                # Deliberately identical wording whether the address belongs to
+                # this partner, another partner, or a direct customer. The
+                # caller learns that it cannot use the address, which is all it
+                # needs, and nothing about who holds it.
+                errors.append("email already registered")
             seen.add(email)
 
         report.rows.append(RowReport(row=i, email=email or None, errors=errors,
                                      name=name, role=role, company_id=company_id))
     return report
+
+
+# The unique index behind users.email. Created inline as `unique=True` in the
+# 0001 baseline, so PostgreSQL generated the name.
+EMAIL_UNIQUE_CONSTRAINT = "users_email_key"
+
+
+def _is_email_conflict(exc: IntegrityError) -> bool:
+    """True only for a violation of users.email uniqueness.
+
+    Matches on the CONSTRAINT NAME from the driver's structured diagnostics, not
+    on the message text: message wording varies with server version and locale,
+    and a substring match on 'email' would also catch a future constraint that
+    merely mentions the column. The name is the identifier the schema actually
+    declares.
+    """
+    diag = getattr(getattr(exc, "orig", None), "diag", None)
+    return getattr(diag, "constraint_name", None) == EMAIL_UNIQUE_CONSTRAINT
+
+
+class EmailAlreadyRegistered(Exception):
+    """A row's email was taken between validate and INSERT.
+
+    The precheck narrows the window; it cannot close it. Two concurrent
+    onboardings can both see an address as free and both try to claim it, and
+    the database decides. This is the fail-closed backstop that turns the
+    resulting unique violation into a stable 409 instead of a 500.
+
+    Carries the address the CALLER supplied -- which the caller already knows --
+    and nothing about the existing holder.
+    """
+    def __init__(self, email: str):
+        self.email = email
+        super().__init__(f"email already registered: {email}")
 
 
 @dataclass
@@ -133,11 +210,20 @@ def provision(db: OrmSession, partner_id: UUID, report: ValidationReport,
     with db.begin_nested():  # SAVEPOINT: all-or-nothing for the batch
         for r in report.valid_rows:
             user_id = uuid4()
-            db.execute(text(
-                "INSERT INTO users (id, email, name, partner_id, billing_source, is_active) "
-                "VALUES (:id, :email, :name, :pid, 'partner', false)"),
-                {"id": str(user_id), "email": r.email, "name": r.name,
-                 "pid": str(partner_id)})
+            try:
+                db.execute(text(
+                    "INSERT INTO users (id, email, name, partner_id, billing_source, is_active) "
+                    "VALUES (:id, :email, :name, :pid, 'partner', false)"),
+                    {"id": str(user_id), "email": r.email, "name": r.name,
+                     "pid": str(partner_id)})
+            except IntegrityError as exc:
+                # Only the email uniqueness violation is reinterpreted. Any other
+                # constraint failure is a real bug and must keep propagating --
+                # catching IntegrityError broadly would quietly turn the tenant
+                # composite FKs from 0007 into "409 conflict" as well.
+                if _is_email_conflict(exc):
+                    raise EmailAlreadyRegistered(r.email) from exc
+                raise
             db.execute(text(
                 "INSERT INTO memberships (user_id, partner_id, scope_type, scope_id, role) "
                 "VALUES (:uid, :pid, 'company', :cid, :role)"),
@@ -155,11 +241,12 @@ def provision(db: OrmSession, partner_id: UUID, report: ValidationReport,
 
 
 def onboard(db: OrmSession, partner_id: UUID, raw_csv: str,
-            sender: EmailSender | None = None) -> tuple[ValidationReport, ProvisionResult | None]:
+            sender: EmailSender | None = None,
+            globally_taken: set[str] | None = None) -> tuple[ValidationReport, ProvisionResult | None]:
     """Validate then, only if clean, provision. Returns (report, result|None)."""
     sender = sender or ConsoleEmailSender()
     rows = parse_csv(raw_csv)
-    report = validate(db, rows)
+    report = validate(db, rows, globally_taken)
     if report.has_errors:
         return report, None
     result = provision(db, partner_id, report, sender)
