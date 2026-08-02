@@ -91,20 +91,158 @@ CHECKS = [
 
     ("0009 conftest seeds a real platform admin",
      "tests/conftest.py", [r"platform_super_admin"], []),
+
+    # ---- round 2: #1 #6 #8 #9 #10 #12 -----------------------------------
+    ("R2 #1  is_platform_admin checks the full platform tuple",
+     "app/auth/principal.py",
+     [r"scope_type == ScopeType\.platform", r"self\.partner_id == NIL"],
+     [r"return Role\.platform_super_admin in self\.roles"]),
+
+    ("R2 #1  membership platform-tuple CHECK exists",
+     "alembic/versions/0010_platform_role_and_status_constraints.py",
+     [r"ck_membership_platform_tuple"], []),
+
+    ("R2 #6  status enum + correlation CHECKs exist",
+     "alembic/versions/0010_platform_role_and_status_constraints.py",
+     [r"ck_connector_verified_at", r"ck_invitation_accepted_at",
+      r"ck_connectors_status_enum"], []),
+
+    ("R2 #8  cursor validates the UUID tail",
+     "app/services/activity.py", [r"cid = UUID\(id_s\)"], []),
+
+    ("R2 #9  invitation password has a length floor",
+     "app/routers/invitations.py", [r"min_length=12"], [r"^\s*password: str\s*$"]),
+
+    ("R2 #10 session model declares the composite FK",
+     "app/models/session.py",
+     [r"ForeignKeyConstraint", r'\["user_id", "partner_id"\]'],
+     [r'ForeignKey\("users\.id"']),
+
+    ("R2 #10 workflow model declares composite FKs, not single-col",
+     "app/models/connector.py",
+     [r"fk_workflows_company_id_partner"],
+     [r'ForeignKey\("companies\.id"']),
+
+    ("R2 #10 token_usage checks mirrored (self-caught drift)",
+     "app/models/usage.py",
+     [r"ck_token_usage_tokens_nonneg", r"ck_token_usage_period_format"], []),
+
+    ("R2 #12 create_workspace rejects over-deep chains",
+     "app/services/workspaces.py",
+     [r"WorkspaceTooDeep", r"depth > MAX_SCOPE_DEPTH"], []),
+
+    ("R2 #12 routers map ScopeChainTooDeep to 4xx",
+     "app/routers/workspaces.py", [r"ScopeChainTooDeep", r"HTTP_409_CONFLICT"], []),
+
+    ("R2 #12 branding router maps ScopeChainTooDeep to 4xx",
+     "app/routers/branding.py", [r"ScopeChainTooDeep"], []),
+
+    # ---- round 2b: alembic check convergence ----------------------------
+    ("R2b #10 SET NULL FKs carry their column list",
+     "app/models/activity_log.py", [r"SET NULL \(actor_user_id\)"], []),
+
+    ("R2b #10 workflows/workspaces SET NULL column lists",
+     "app/models/connector.py", [r"SET NULL \(template_id\)"], []),
+
+    ("R2b #10 workspace parent SET NULL column list",
+     "app/models/workspace.py", [r"SET NULL \(parent_workspace_id\)"], []),
+
+    ("R2b #10 subscriptions is modelled (autogen wanted to DROP it)",
+     "app/models/subscription.py", [r'__tablename__ = "subscriptions"'], []),
+
+    ("R2b #10 subscriptions registered in metadata",
+     "app/models/__init__.py", [r"from app\.models\.subscription import Subscription"], []),
+
+    ("R2b #10 indexes declared (autogen wanted to drop 17)",
+     "app/models/activity_log.py", [r"ix_activity_partner_created"], []),
+
+    # ---- round 3: TOCTOU (#2 #3 #4) -------------------------------------
+    ("R3 #2  RLS gates on partner active-state",
+     "alembic/versions/0011_rls_active_state_gate.py",
+     [r"partner_is_active", r"partner_id = \{GUC\} AND partner_is_active"], []),
+
+    ("R3 #2  active-state predicate has ONE shared definition",
+     "alembic/versions/0011_rls_active_state_gate.py",
+     [r"GRANT EXECUTE ON FUNCTION partner_is_active", r"PARTNER_ID_TABLES"], []),
+
+    ("R3 #3  login refuses a suspended partner",
+     "app/routers/auth.py", [r"FOR SHARE", r"partner is suspended"], []),
+
+    ("R3 #4  lifecycle transitions lock the partner row",
+     "app/services/partners.py", [r"def _lock_partner", r"FOR UPDATE"], []),
+
+    ("R3 #4  purge locks candidates and deletes conditionally",
+     "app/services/maintenance.py",
+     [r"FOR UPDATE SKIP LOCKED", r"RETURNING id"], []),
+
+    ("R3b  partners policy stays ungated (no policy->function->policy loop)",
+     "alembic/versions/0011_rls_active_state_gate.py",
+     [r"REVOKE INSERT, UPDATE, DELETE ON partners FROM app_runtime"],
+     [r"partner_self_isolation ON partners \"\)\n    op\.execute\(\s*\n?\s*f\"CREATE POLICY partner_self_isolation.*partner_is_active"]),
+
+    # The CREATE FUNCTION body sits inside a triple-quoted SQL block that
+    # _strip_comments removes, so SECURITY INVOKER/DEFINER cannot be asserted
+    # here. What IS assertable, and is what actually breaks the recursion:
+    # partners must not appear in the gated table list.
+    # ---- round 4: #7 global email uniqueness ----------------------------
+    ("R4 #7  cross-tenant precheck runs on the platform path",
+     "app/routers/onboarding.py",
+     [r"def _resolve_taken", r"platform_session\(\)"], []),
+
+    ("R4 #7  precheck is resolved outside the partner transaction",
+     "app/routers/onboarding.py",
+     [r"taken = _resolve_taken\(.*\)\n    with session_for_principal"], []),
+
+    ("R4 #7  row error does not disclose ownership",
+     "app/services/onboarding.py",
+     [r'"email already registered"'], [r"already exists for this partner"]),
+
+    ("R4 #7  conflict matched by constraint name, not message text",
+     "app/services/onboarding.py",
+     [r"EMAIL_UNIQUE_CONSTRAINT", r"constraint_name"], []),
+
+    ("R4 #7  only the email constraint is reinterpreted",
+     "app/services/onboarding.py",
+     [r"if _is_email_conflict\(exc\)",
+      r"raise EmailAlreadyRegistered\(r\.email\) from exc\s+raise\s"], []),
+
+    ("R4 #7  no test still asserts the ownership-disclosing wording",
+     "tests/test_onboarding.py",
+     [r"already registered"], [r"already exists"]),
+
+    ("R4 #7  commit maps the conflict to 409",
+     "app/routers/onboarding.py",
+     [r"HTTP_409_CONFLICT", r"EmailAlreadyRegistered"], []),
+
+    ("R3c  lifecycle revoke is column-scoped, not table-wide",
+     "alembic/versions/0011_rls_active_state_gate.py",
+     [r"GRANT UPDATE \(billing_contact_email\) ON partners TO app_runtime"], []),
+
+    ("R3b  partners is NOT in the gated policy list (breaks the loop)",
+     "alembic/versions/0011_rls_active_state_gate.py",
+     [r'PARTNER_ID_TABLES = \['],
+     [r'"partners",']),
 ]
 
 REQUIRED_FILES = [
     "alembic/versions/0007_composite_tenant_fks.py",
     "alembic/versions/0008_value_constraints_and_grants.py",
     "alembic/versions/0009_platform_tenant.py",
+    "alembic/versions/0010_platform_role_and_status_constraints.py",
     "tests/test_cross_table_isolation.py",
     "tests/test_platform_authorization.py",
+    "tests/test_platform_role_integrity.py",
+    "tests/test_workspace_depth.py",
+    "tests/test_toctou_lifecycle.py",
+    "tests/test_email_uniqueness.py",
+    "alembic/versions/0011_rls_active_state_gate.py",
 ]
 
-# def test_ count per file, after the patches. test_billing_bypass's single
-# function parametrizes into 5, so pytest should collect 100.
-EXPECTED_DEF_TESTS = 96
-EXPECTED_COLLECTED = 100
+# def test_ count per file, after this round's patches. test_bypass_truth_table
+# parametrizes into 5. Baseline was 96 functions / 100 collected; this round
+# adds two test files (counts filled in once written).
+EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6   # +8 TOCTOU concurrency tests
+EXPECTED_COLLECTED = 100 + 11 + 12 + 6
 
 
 def _strip_comments(src: str) -> str:
