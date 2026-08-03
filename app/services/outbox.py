@@ -50,10 +50,16 @@ class DispatchResult:
     sent: list[UUID] = field(default_factory=list)
     retried: list[UUID] = field(default_factory=list)
     dead_lettered: list[UUID] = field(default_factory=list)
+    # Events whose invitation died before the mail went out. Counted in total
+    # because "nothing happened" is false when rows were terminated, and a
+    # caller checking total == 0 to decide whether to log anything would
+    # otherwise miss a batch of them.
+    terminated: list[UUID] = field(default_factory=list)
 
     @property
     def total(self) -> int:
-        return len(self.sent) + len(self.retried) + len(self.dead_lettered)
+        return (len(self.sent) + len(self.retried) + len(self.dead_lettered)
+                + len(self.terminated))
 
 
 def enqueue_invitation(db: OrmSession, *, partner_id: UUID, invitation_id: UUID,
@@ -86,20 +92,95 @@ def enqueue_invitation(db: OrmSession, *, partner_id: UUID, invitation_id: UUID,
 
 
 def _claim(db: OrmSession, limit: int) -> list:
-    """Take a batch of due events, locked so a second dispatcher takes others.
+    """Take a batch of DELIVERABLE events, locked so a second dispatcher takes
+    others.
 
-    FOR UPDATE SKIP LOCKED is what makes concurrent dispatchers safe: the second
-    one steps over rows the first is holding instead of blocking on them or --
-    far worse -- reading them and sending the same mail twice.
+    "Due" is not the same as "still worth sending", and this query used to ask
+    only the first question -- status pending, available_at reached -- which is
+    entirely about the event and says nothing about whether the thing it exists
+    to deliver is still real. Reported live: an expired invitation was mailed,
+    and the recipient got a token that could never be redeemed.
+
+    Two facts are joined in, neither of them a fresh copy of a rule stated
+    elsewhere:
+
+      * the invitation is still pending and unexpired. The invitations table is
+        the single adjudicator of that, and 0015 made the lifecycle transitions
+        write revocation there rather than leaving it to be inferred.
+      * the partner may act -- partner_is_active(), the same function twelve
+        policies call. NOT `p.status = 'active'` spelled out again here: this
+        path runs BYPASSRLS, which makes it exactly the kind of place a second
+        copy of the predicate drifts unnoticed.
+
+    FOR UPDATE **OF o**, not a bare FOR UPDATE. Without the OF clause PostgreSQL
+    locks the matching row in every table of the join, so the dispatcher would
+    take row locks on invitations -- contending with accept_invitation for them,
+    and, with SKIP LOCKED, silently declining to send mail for any invitation a
+    redemption happened to be touching. The dispatcher has no business locking a
+    row it only reads.
+
+    SKIP LOCKED is what makes concurrent dispatchers safe: the second steps over
+    rows the first is holding instead of blocking on them or -- far worse --
+    reading them and sending the same mail twice.
     """
     return db.execute(text(
-        "SELECT id, partner_id, invitation_id, event_type, recipient, "
-        "       token_ciphertext, token_nonce, key_version, attempts "
-        "FROM outbox_events "
-        "WHERE status = 'pending' AND available_at <= now() "
-        "ORDER BY available_at "
+        "SELECT o.id, o.partner_id, o.invitation_id, o.event_type, o.recipient, "
+        "       o.token_ciphertext, o.token_nonce, o.key_version, o.attempts "
+        "FROM outbox_events o "
+        "JOIN invitations i "
+        "  ON i.id = o.invitation_id AND i.partner_id = o.partner_id "
+        "WHERE o.status = 'pending' AND o.available_at <= now() "
+        "  AND i.status = 'pending' AND i.expires_at > now() "
+        "  AND public.partner_is_active(o.partner_id) "
+        "ORDER BY o.available_at "
         "LIMIT :lim "
-        "FOR UPDATE SKIP LOCKED"), {"lim": limit}).all()
+        "FOR UPDATE OF o SKIP LOCKED"), {"lim": limit}).all()
+
+
+def _reap_undeliverable(db: OrmSession, limit: int) -> list:
+    """Move events whose invitation died to a terminal state, secret cleared.
+
+    Without this they stay pending forever: invisible to the claim above, still
+    holding recoverable ciphertext, and indistinguishable from a backlog.
+
+    ONLY IRREVERSIBLE CONDITIONS TERMINATE. accepted, revoked and expired are
+    all one-way, so an event whose invitation is in one of those states can
+    never become deliverable again and its payload is pure liability.
+
+    A suspended partner is NOT one of them, and that is a deliberate departure
+    from treating "not currently deliverable" and "never deliverable" as the
+    same question. Suspension can be lifted. Terminating on it would destroy
+    deliverable mail on a condition that may not hold tomorrow, and clearing the
+    ciphertext is not undoable -- reactivating the partner could not bring the
+    token back. Those events stay pending and simply go unclaimed for the
+    duration; their ciphertext is still bounded, because the invitation expires
+    on its own schedule and the expiry branch here collects it then.
+
+    The irreversible half is already recorded where it belongs: 0015 made
+    suspension and domain deactivation revoke the invitations they invalidate.
+    This reads that decision instead of making a second one about the same fact.
+    """
+    return db.execute(text(
+        "WITH doomed AS ("
+        "  SELECT o.id, "
+        "         CASE WHEN i.status <> 'pending' "
+        "              THEN 'invitation ' || i.status "
+        "              ELSE 'invitation expired' END AS reason "
+        "  FROM outbox_events o "
+        "  JOIN invitations i "
+        "    ON i.id = o.invitation_id AND i.partner_id = o.partner_id "
+        "  WHERE o.status = 'pending' "
+        "    AND (i.status <> 'pending' OR i.expires_at <= now()) "
+        "  ORDER BY o.id "
+        "  LIMIT :lim "
+        "  FOR UPDATE OF o SKIP LOCKED"
+        ") "
+        "UPDATE outbox_events e "
+        "   SET status = 'failed', last_error = d.reason, "
+        "       token_ciphertext = NULL, token_nonce = NULL "
+        "  FROM doomed d "
+        " WHERE e.id = d.id "
+        "RETURNING e.id"), {"lim": limit}).scalars().all()
 
 
 def dispatch_pending(db: OrmSession, sender: EmailSender, *,
@@ -113,6 +194,12 @@ def dispatch_pending(db: OrmSession, sender: EmailSender, *,
     retrying forever.
     """
     result = DispatchResult()
+
+    # Reap first, so a batch is not spent decrypting events that are already
+    # dead. The claim re-checks the same conditions independently rather than
+    # trusting this to have caught everything: a redemption can commit between
+    # the two statements, and this one stops at `limit`.
+    result.terminated.extend(_reap_undeliverable(db, limit))
 
     for row in _claim(db, limit):
         aad = build_aad(event_id=row.id, invitation_id=row.invitation_id,

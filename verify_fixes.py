@@ -196,8 +196,15 @@ CHECKS = [
      "app/services/outbox_crypto.py",
      [r"def build_aad", r"event_id", r"invitation_id", r"partner_id"], []),
 
-    ("R6 dispatcher claims with SKIP LOCKED",
-     "app/services/outbox.py", [r"FOR UPDATE SKIP LOCKED"], []),
+    # Was [r"FOR UPDATE SKIP LOCKED"]. R11 joins invitations into the claim, and
+    # a bare FOR UPDATE would then lock rows in every joined table -- so the
+    # correct form gained an OF clause and this check had to follow it. Kept as
+    # a negative too: dropping back to the bare form is silent and would make
+    # the dispatcher hold invitations rows across an SMTP call.
+    ("R6 dispatcher claims with SKIP LOCKED, locking only the event",
+     "app/services/outbox.py",
+     [r"FOR UPDATE OF o SKIP LOCKED"],
+     [r"[^F] FOR UPDATE SKIP LOCKED"]),
 
     ("R6 delivery clears the secret in the same statement",
      "app/services/outbox.py",
@@ -284,6 +291,25 @@ CHECKS = [
      "tests/test_rls_coverage.py",
      [r"COLUMN_GRANT_SQL", r"def reachable", r"def writable"],
      [r"PARTNER_ID_TABLES"]),
+
+    # Roles are enumerated from pg_roles, not listed here. A hardcoded role list
+    # is the same disease one level up: app_dispatcher would exist, hold grants,
+    # and be invisible until someone remembered to add it.
+    ("R10 the guard enumerates roles from the catalog",
+     "tests/test_rls_coverage.py",
+     [r"ROLE_SQL", r"def confined_roles", r"def bypass_roles",
+      r"BYPASS_ROLES = \{"],
+     [r"^ROLES = \["]),
+
+    # A BYPASSRLS role does not fail the RLS assertions, it makes them vacuous.
+    ("R10 the set of RLS-bypassing roles is pinned in both directions",
+     "tests/test_rls_coverage.py",
+     [r"actual - declared", r"declared - actual", r"rolsuper"], []),
+
+    ("R10 permissive-true policies are registered and never reach PUBLIC",
+     "tests/test_rls_coverage.py",
+     [r"PERMISSIVE_TRUE", r'"public" in p\.roles',
+      r"set\(PERMISSIVE_TRUE\) - seen"], []),
 
     ("R7 coverage guard pins its exemptions in BOTH directions",
      "tests/test_rls_coverage.py",
@@ -385,6 +411,32 @@ CHECKS = [
       r"assert _wait_until_blocked\(engine\)",
       r"threading\.Thread"], []),
 
+    # ---- round 11: the claim asks whether the mail is still worth sending -
+    ("R11 #5 the claim joins invitations and gates on the shared predicate",
+     "app/services/outbox.py",
+     [r"i\.id = o\.invitation_id AND i\.partner_id = o\.partner_id",
+      r"public\.partner_is_active\(o\.partner_id\)"],
+     [r"p\.status = 'active'"]),
+
+    ("R11 #5 dead invitations reach a terminal state with no secret left",
+     "app/services/outbox.py",
+     [r"def _reap_undeliverable",
+      r"token_ciphertext = NULL, token_nonce = NULL ",
+      r"result\.terminated\.extend"], []),
+
+    # Suspension is reversible; clearing ciphertext is not. Both halves of that
+    # call are pinned -- held now, and deliverable again afterwards -- because
+    # holding is only the right answer if the mail actually goes out later.
+    ("R11 #5 a suspended partner's event is held, not destroyed",
+     "tests/test_outbox_claim.py",
+     [r"def test_a_suspended_partners_event_is_held_not_terminated",
+      r"def test_reactivation_makes_a_held_event_deliverable_again",
+      r'== "55P03"'], []),
+
+    ("R11 alembic_version is revoked from the platform role too",
+     "alembic/versions/0016_ledger_revoke_platform.py",
+     [r'ROLE = "app_platform"', r"REVOKE ALL ON \{BOOKKEEPING\} FROM \{ROLE\}"], []),
+
     ("R9 login consumes the shared predicate instead of its own copy",
      "app/routers/auth.py",
      [r"public\.partner_is_active\(id\)", r"FOR SHARE"],
@@ -416,13 +468,15 @@ REQUIRED_FILES = [
     "tests/test_outbox_isolation.py",
     "alembic/versions/0015_billing_gate_function.py",
     "tests/test_lifecycle_gate.py",
+    "alembic/versions/0016_ledger_revoke_platform.py",
+    "tests/test_outbox_claim.py",
 ]
 
 # def test_ count per file, after this round's patches. test_bypass_truth_table
 # parametrizes into 5. Baseline was 96 functions / 100 collected; this round
 # adds two test files (counts filled in once written).
-EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 6 + 4 + 12 + 2   # +2 redemption races
-EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 6 + 4 + 12 + 2
+EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7   # +7 outbox claim
+EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7
 
 
 def _strip_comments(src: str) -> str:
