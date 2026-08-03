@@ -5,8 +5,9 @@ own companies, workspaces, users, branding, workflows and usage, with
 **database-enforced tenant isolation**. The existing direct-customer Stripe flow
 is preserved untouched; partner-managed users bypass Stripe.
 
-Built as a portfolio project. Phase 1 (this cut) delivers the part that is
-genuinely hard to do well: provable cross-tenant isolation.
+Built as a portfolio project. All five feature phases are complete, plus a
+sixth audit-driven hardening round that closed every cross-tenant hole the
+earlier audits surfaced.
 
 ## The isolation design (structural, not behavioural)
 
@@ -33,16 +34,30 @@ tenants no matter what the query says.
 ### Safe migration / backward compatibility
 
 - New partner-owned tables (`partners`, `companies`, `memberships`,
-  `partner_activity_log`): RLS **ENABLED and FORCED** → fail closed, even for the
-  owner, even with no tenant context set.
-- The pre-existing `users` table gains `partner_id` / `billing_source` with safe
-  defaults (nil-sentinel partner + `stripe`) and RLS **ENABLED but not FORCED**,
-  so the existing direct-customer + Stripe path (`app_platform`) is unchanged.
+  `partner_activity_log`, `sessions`, `workspaces`, `invitations`,
+  `connectors`, `workflow_templates`, `workflows`, `token_usage`,
+  `threads`, `outbox_events`): RLS **ENABLED and FORCED** → fail closed,
+  even for the owner, even with no tenant context set.
+- The pre-existing `users` table gains `partner_id` / `billing_source` with
+  safe defaults (nil-sentinel partner + `stripe`) and RLS **ENABLED but not
+  FORCED**, so the existing direct-customer + Stripe path (`app_platform`) is
+  unchanged.
 
 ### Tenant scope comes from the server, never the client
 
 `partner_id` is derived from the authenticated principal and applied with
 `SET LOCAL` (transaction-scoped, pooling-safe). The client never supplies it.
+
+### Row visibility ≠ referential integrity
+
+RLS decides "may I see or write THIS row". It does not decide "is the row I
+POINT AT mine". PostgreSQL deliberately exempts referential-integrity checks
+from row security (so that constraints cannot be subverted by hiding rows).
+That is correct in general, and it is exactly why every single-column FK was a
+tenant hole: under partner A's RLS scope, inserting `workflows.company_id =
+<company of B>` succeeds because the FK trigger looks up the parent row without
+any tenant scope and finds it. The hardening round (Phase 6) closes every one
+of those holes with composite tenant FKs and DB-side gate functions.
 
 ## Auth & lifecycle (Phase 2)
 
@@ -68,6 +83,10 @@ path (and RLS scope) the request runs under.
   the caller's own tree.
 - **Workspaces** form a company-scoped parent/child tree and sit under the same
   ENABLE+FORCE RLS as the other partner tables.
+- **Transactional outbox for email.** Invitation delivery is decoupled from the
+  transaction: an `outbox_events` row is committed inside the SAVEPOINT, and a
+  background worker delivers the email only after the transaction commits. A
+  failed row 2 no longer orphans row 1's email.
 
 ## RBAC & onboarding (Phase 3)
 
@@ -98,22 +117,83 @@ no password; redeeming the one-time token sets their password and activates them
 after which the Phase 2 login flow works. Delivery is behind a pluggable
 `EmailSender` (console by default; an in-memory outbox in tests).
 
+**Email uniqueness.** `users.email` is globally unique (baseline schema UNIQUE
+constraint). When onboarding collides, the SAVEPOINT rolls back and the
+per-row error maps the unique-violation to a stable 409 response.
+
+## Hardening round (Phase 6)
+
+Nine migrations driven by external audits. Each closes one class of cross-tenant
+hole that the earlier phases left open.
+
+| Migration | Hole closed |
+|-----------|-------------|
+| **0007** composite tenant FKs | FK triggers bypass RLS — a row in A could point at B's row. Every FK now includes `partner_id` and is checked under the caller's RLS scope. |
+| **0008** value constraints + grants | `token_usage` accepted negative counts and impossible periods; `app_runtime` had blanket DML on every table including direct-customer data. |
+| **0009** platform tenant row | The nil UUID (platform/direct sentinel) had no row to reference — `users.partner_id` and `sessions.partner_id` were the only partner columns without an FK, allowing phantom partner IDs. |
+| **0010** platform role integrity | A forged membership could grant `platform_super_admin` inside a partner's own RLS scope. Role insertion is now gated by the platform path. |
+| **0011** RLS active-state gate | TOCTOU: identity resolved in one transaction, business operation in the next — a suspend could slip between. The `partners` policy now gates on `partner_is_active()`, which reads the row under BYPASSRLS so the check is never RLS-scoped. |
+| **0012** workspace parent same-company | A workspace could be reparented under a sibling workspace in the same partner but different company, causing scope inheritance to return the wrong company. |
+| **0013** transactional outbox | Invitation emails were sent inside the batch SAVEPOINT — row 2 failure orphaned row 1's email. Outbox decouples delivery from the transaction. |
+| **0014** outbox RLS + bookkeeping | The outbox table shipped with no tenant boundary; any tenant could read, rewrite, or delete another tenant's queued mail. RLS ENABLE + FORCE applied, plus a migration bookkeeping table. |
+| **0015** billing gate function | `billing_contact_email` was the one column outside the write gate (REVOKE + GRANT workaround). A suspended partner's in-flight request could still update it. A DB-side gate function now makes the write decision inside PostgreSQL, closing the TOCTOU window entirely. |
+
+## API overview
+
+| Router | Prefix | Purpose |
+|--------|--------|---------|
+| `auth` | `/auth` | Login / logout (platform path) |
+| `partners` | `/partners` | Partner lifecycle: suspend / activate / deactivate-domain, billing contact |
+| `workspaces` | `/workspaces` | Company-scoped workspace tree (parent/child) |
+| `onboarding` | `/onboarding` | Two-step CSV onboarding (validate + commit) |
+| `invitations` | `/invitations` | Invite redemption (one-time token → password + activation) |
+| `activity` | `/activity` | Keyset-paginated activity log with date/event filters |
+| `branding` | `/branding` | Workspace and company branding inheritance |
+| `workflows` | `/workflows` | Template cloning gated by connector verification |
+| `usage` | `/usage` | Monthly per-partner token usage |
+| `maintenance` | `/maintenance` | 60-day suspension purge + 1-year thread archival |
+
+## Tests
+
+≈168 tests across 30 files (`make test`). The suite covers:
+
+- **Tenant isolation** — visibility, write blocking, cross-tenant FK rejection
+- **Cross-table reference ownership** — FK triggers cannot be used to point at
+  another tenant's row (composite FKs + RLS interaction)
+- **RLS coverage** — every partner-owned table verified under RLS
+- **TOCTOU races** — suspend/deactivate vs invitation redemption, with real
+  lock contention (`wait_event_type = 'Lock'`) asserted
+- **Lifecycle gates** — suspended partner cannot update billing, deactivated
+  domain cannot receive invitations
+- **Outbox isolation** — each tenant's queued mail is invisible to other tenants
+- **Platform role integrity** — forged membership cannot grant platform roles
+- **Scope inheritance** — Partner Super Admin reaches the full subtree;
+  Company Admin is bounded to its own company
+- **Password hashing** — PBKDF2-HMAC-SHA256 with constant-time verification
+
 ## Run it
 
-    make up      # postgres + auto-migrate + api on :8000
-    make test    # tenant-isolation suite
+```bash
+make up      # postgres + auto-migrate + api on :8000
+make test    # tenant-isolation suite (≈168 tests)
+make migrate # run alembic migrations
+make logs    # tail the API container
+```
 
-Or: `docker compose up -d --build`, then `docker compose exec api pytest`.
+Or manually:
 
-## What the tests prove (`tests/test_tenant_isolation.py`)
+```bash
+docker compose up -d --build
+docker compose exec api pytest
+```
 
-- a partner sees only its own companies / activity log / partner row
-- reading another partner's row by id returns nothing
-- a cross-tenant UPDATE affects 0 rows
-- inserting a row for another partner is rejected (WITH CHECK)
-- with no tenant context, partner tables return nothing (fail closed)
-- a partner cannot see direct-customer users
-- the platform path still sees across all tenants (existing flow intact)
+### Verification tools
+
+- `verify_fixes.py` — validates that each audit item's fix is present in the
+  codebase and that the test count matches expectations. Run after any round of
+  fixes to confirm nothing was missed.
+- `check_container_sync.sh` — checks that the running container state matches
+  the expected Docker configuration.
 
 ## Roadmap
 
@@ -127,17 +207,25 @@ Or: `docker compose up -d --build`, then `docker compose exec api pytest`.
   parent-hub branding inheritance, billing-contact controls.
 - **Phase 5 (done):** workflow-template cloning gated by connector verification,
   monthly token-usage tracking, 60-day suspension purge + 1-year thread archival.
+- **Phase 6 (done):** audit-driven hardening — composite tenant FKs, value
+  constraints, platform tenant materialization, role integrity, RLS active-state
+  gate, workspace parent same-company, transactional outbox, billing gate function.
 
-See `WALKTHROUGH.md` for the full cross-phase design narrative.
+**Next:** production deployment (containerized, multi-instance), observability
+(metrics / tracing), rate limiting, per-partner email uniqueness, SMTP email
+delivery.
 
-## Known limitations (Phase 3)
+## Known limitations
 
-- `users.email` is globally unique (inherited from the baseline schema), so the
-  same email can't belong to two partners. RLS hides cross-tenant rows from
-  onboarding validation, so such a collision surfaces only at commit — where the
-  SAVEPOINT rolls the batch back. Relaxing to per-partner uniqueness is a later
-  migration.
-- CSV onboarding is a Partner-Super-Admin capability (enforced at partner scope);
-  company-scoped self-service onboarding isn't wired yet.
-- `resolve_branding` demonstrates parent-hub inheritance, but the full branding
-  and billing-contact API is Phase 4.
+- **Console email by default.** `EmailSender` prints to stdout unless a custom
+  implementation is wired in. SMTP delivery is not configured out of the box.
+- **No rate limiting.** API requests are unbounded; add a middleware or gateway
+  layer before production exposure.
+- **Single-instance design.** The current `docker compose` setup runs one API
+  replica; horizontal scaling requires a shared session store and connection
+  pooler.
+- **CSV onboarding is Partner-Super-Admin only.** Company-scoped self-service
+  onboarding is not wired yet.
+- **Global email uniqueness.** `users.email` is globally unique (baseline
+  schema). Cross-partner collisions are handled gracefully (409 on commit), but
+  per-partner uniqueness would require a migration.
