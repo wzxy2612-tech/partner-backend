@@ -44,10 +44,29 @@ def login(body: LoginBody) -> TokenResponse:
         # issued). Without the lock the suspend can land between them and leave
         # a live session behind.
         if user.partner_id != NIL:
+            # partner_is_active(), not an inline status comparison.
+            #
+            # This was `row.status != "active"` -- a second, independent copy of
+            # a fact that twelve RLS policies already get from one function.
+            # Two copies agree until the definition moves: add a
+            # `pending_deletion` state, or a retention window that keeps a row
+            # nominally active, and the policies and this line start answering
+            # differently for the same partner. Nothing would fail loudly; login
+            # would just admit sessions the database was refusing to serve.
+            #
+            # The FOR SHARE stays exactly where it was. It is what makes the
+            # read and the issuance one decision.
+            #
+            # It is legal here only because login runs on the platform
+            # connection: SELECT ... FOR SHARE requires UPDATE privilege on the
+            # table, and app_runtime has held none on partners since 0015.
+            # Moving this query to the runtime path would fail with permission
+            # denied, not with a wrong answer.
             row = db.execute(text(
-                "SELECT status FROM partners WHERE id = :pid FOR SHARE"),
+                "SELECT public.partner_is_active(id) AS active "
+                "FROM partners WHERE id = :pid FOR SHARE"),
                 {"pid": str(user.partner_id)}).first()
-            if row is None or row.status != "active":
+            if row is None or not row.active:
                 raise HTTPException(status.HTTP_403_FORBIDDEN, "partner is suspended")
         # Scope is taken from the stored user, not from the request.
         token = issue_session(db, user_id=user.id, partner_id=user.partner_id)

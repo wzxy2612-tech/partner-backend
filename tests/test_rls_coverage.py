@@ -68,9 +68,16 @@ NOT_FORCED = {"users", "sessions"}
 # what test_the_exemptions_are_still_true pins.
 UNGATED_POLICY = {"partners"}
 
-# The ONE column the tenant may self-serve on `partners` (0011). Anything else
-# appearing here means the lifecycle became writable from the runtime path.
-PARTNERS_RUNTIME_COLUMNS = {("billing_contact_email", "UPDATE")}
+# EMPTY, since 0015. 0011 left one column writable from the runtime path --
+# billing_contact_email, legitimate tenant self-service -- but the partners
+# policy is ungated, so that column sat outside the active-state gate and a
+# stale request could write it after a suspension committed. 0015 revoked it and
+# moved the write into a SECURITY DEFINER function that applies the gate itself.
+#
+# Anything appearing here again means some column of `partners` became writable
+# from the runtime path, which under an ungated policy means a suspended tenant
+# can act on its own lifecycle row.
+PARTNERS_RUNTIME_COLUMNS: set[tuple[str, str]] = set()
 
 
 # ---------------------------------------------------------------------------

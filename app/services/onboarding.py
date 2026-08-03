@@ -275,7 +275,8 @@ def onboard(db: OrmSession, partner_id: UUID, raw_csv: str,
 
 def accept_invitation(db: OrmSession, token: str, password: str) -> bool:
     """Redeem an invitation: set the user's password, activate them, mark accepted.
-    Returns False if the token is unknown, already used, or expired.
+    Returns False if the token is unknown, already used, expired, or belongs to a
+    partner that is not currently active.
 
     The status transition IS the claim. This used to SELECT the invitation,
     decide it was pending, then unconditionally UPDATE -- so two concurrent
@@ -283,10 +284,40 @@ def accept_invitation(db: OrmSession, token: str, password: str) -> bool:
     proceed, leaving whichever password landed second. A single conditional
     UPDATE moves the decision into the row lock: exactly one caller can see a
     row transition out of `pending`, and only that caller gets a returned row.
+
+    The partner check was missing from that claim, and this path runs on the
+    platform connection, which is BYPASSRLS -- so the active-state gate that
+    twelve policies enforce does not exist here. Reported live: suspend a
+    partner, redeem an old token, and the user is activated; reactivate the
+    partner later and they can log in. The gate has to be spelled out on this
+    side, because RLS is precisely what this side does not have.
+
+    There is deliberately no condition on `users.is_active`. An invited user is
+    inactive from creation until redemption, so that flag cannot distinguish
+    "not yet redeemed" from "revoked" -- reading it as the latter would refuse
+    every legitimate redemption. The invitation's own status carries that fact,
+    which is why the lifecycle transitions revoke invitations rather than
+    relying on the user row to imply it.
+
+    And that is also what orders this against a concurrent suspension, with no
+    explicit lock needed. An earlier version took FOR SHARE on the partner row
+    first, out of worry about how PostgreSQL re-evaluates a WHERE clause
+    containing a function over a DIFFERENT table when an UPDATE unblocks. But
+    suspension revokes the invitation in the same transaction, so the deciding
+    predicate is `status = 'pending'` -- a column on the very row being locked,
+    which is exactly the case re-evaluation handles unambiguously. The partner
+    check is depth, not the mechanism.
+
+    The lock was not merely redundant. SELECT ... FOR SHARE requires UPDATE
+    privilege on the table, which app_runtime held only through 0011's
+    column-level grant on billing_contact_email -- the grant 0015 removes. It
+    would have been a lock whose legality depended on a privilege the same
+    revision took away.
     """
     claimed = db.execute(text(
         "UPDATE invitations SET status = 'accepted', accepted_at = now() "
         "WHERE token_hash = :h AND status = 'pending' AND expires_at > now() "
+        "  AND public.partner_is_active(partner_id) "
         "RETURNING user_id"),
         {"h": hash_token(token)}).first()
     if claimed is None:

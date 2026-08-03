@@ -173,15 +173,22 @@ def test_tenant_can_still_update_its_billing_contact(temp_partner, runtime_engin
 
     Blocking self-reactivation by revoking UPDATE on the whole partners table
     also killed billing-contact self-service (P4), which is a legitimate tenant
-    action. The rule is "the runtime path may not drive the LIFECYCLE" -- that
-    is about specific columns, so the grant is column-level. This pins the
-    allowed side; test_suspended_tenant_cannot_reactivate_itself pins the
-    forbidden side. Neither alone describes the boundary."""
+    action. 0011 kept it alive with a column-level grant. 0015 took that grant
+    away too -- the partners policy is ungated, so the column sat outside the
+    active-state gate and a stale request could still write it after a
+    suspension committed -- and moved the write into a SECURITY DEFINER function
+    that applies the gate itself.
+
+    So the allowed side is still allowed; only the door moved. This pins that
+    the door works; test_suspended_tenant_cannot_reactivate_itself pins the
+    forbidden side, and test_lifecycle_gate pins that the old door is shut.
+    Neither alone describes the boundary."""
     pid, _ = temp_partner
     with runtime_engine.connect() as c:
         c.execute(text("SELECT set_config('app.partner_id', :p, false)"), {"p": str(pid)})
-        c.execute(text("UPDATE partners SET billing_contact_email = :e WHERE id = :p"),
-                  {"e": "billing@tenant.test", "p": str(pid)})
+        assert c.execute(text(
+            "SELECT public.set_active_partner_billing_contact('billing@tenant.test')"
+        )).scalar_one() is True
         c.commit()
         got = c.execute(text("SELECT billing_contact_email FROM partners WHERE id = :p"),
                         {"p": str(pid)}).scalar_one()

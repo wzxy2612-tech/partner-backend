@@ -318,6 +318,68 @@ CHECKS = [
      "tests/test_outbox_isolation.py",
      [r"result\.rowcount == 0", r"_recipient_now\(platform_engine",
       r"scalar_one\(\) == 1", r'== "42501"'], []),
+    # ---- round 9: 0015, the gate gets a second consumer -----------------
+    # The function body lives in a triple-quoted block that _strip_comments
+    # removes, so SECURITY DEFINER / GET DIAGNOSTICS cannot be asserted here.
+    # The signature in FN survives, and it is the thing that matters: a
+    # partner_id parameter would make the function silently return false for
+    # every tenant instead of raising (see 0015's docstring).
+    ("R9 #8 the billing function takes only an email, never a tenant id",
+     "alembic/versions/0015_billing_gate_function.py",
+     [r"set_active_partner_billing_contact\(text\)"],
+     [r"set_active_partner_billing_contact\(uuid"]),
+
+    ("R9 #8 the column grant is revoked and PUBLIC never gets EXECUTE",
+     "alembic/versions/0015_billing_gate_function.py",
+     [r"REVOKE UPDATE \(billing_contact_email\) ON public\.partners FROM app_runtime",
+      r"REVOKE ALL ON FUNCTION \{FN\} FROM PUBLIC",
+      r"GRANT EXECUTE ON FUNCTION \{FN\} TO app_runtime"], []),
+
+    ("R9 #8 the service no longer writes partners directly",
+     "app/services/partners.py",
+     [r"set_active_partner_billing_contact\(CAST\(:e AS text\)\)"],
+     [r"UPDATE partners SET billing_contact_email"]),
+
+    # The first cut kept a partner_id parameter the function ignores: called
+    # while scoped to A with B's id, it wrote A's row and reported success.
+    ("R9 #8 the billing wrapper takes no tenant it would then ignore",
+     "app/services/partners.py",
+     [r"def set_billing_contact\(db: OrmSession, email: str \| None\)"],
+     [r"def set_billing_contact\(db: OrmSession, partner_id"]),
+
+    ("R9 #8 a refused billing write becomes 403, not a reported success",
+     "app/routers/partners.py",
+     [r"if not set_billing_contact\(", r"HTTP_403_FORBIDDEN"], []),
+
+    # No FOR SHARE here. It required UPDATE privilege on partners, which
+    # app_runtime held only through the column grant 0015 revokes -- and it was
+    # redundant anyway: suspension revokes the invitation, so the deciding
+    # predicate is a column on the row the UPDATE already locks.
+    ("R9 #9 redemption is gated, and claims on the invitation's own status",
+     "app/services/onboarding.py",
+     [r"public\.partner_is_active\(partner_id\)",
+      r"status = 'pending' AND expires_at > now\(\)"],
+     [r"FROM partners WHERE id = :p FOR SHARE"]),
+
+    # `AND is_active = true` is the exact filter that let a pending invitee
+    # survive a domain deactivation: inactive is the normal state for an
+    # invited user, so that clause skipped the accounts still at risk.
+    ("R9 #9 domain deactivation scans every user on the domain",
+     "app/services/partners.py",
+     [r"cannot be domain-deactivated", r"_revoke_pending_invitations\(db, partner_id, user_ids="],
+     [r"AND is_active = true"]),
+
+    ("R9 #9 revocation clears the queued secret, not just the invitation",
+     "app/services/partners.py",
+     [r"token_ciphertext = NULL, token_nonce = NULL",
+      r"if user_ids is not None", r"if not user_ids"], []),
+
+    # An empty user_ids list means "matched nobody" and must not be read as
+    # "no narrowing", which would revoke the whole partner's invitations.
+    ("R9 login consumes the shared predicate instead of its own copy",
+     "app/routers/auth.py",
+     [r"public\.partner_is_active\(id\)", r"FOR SHARE"],
+     [r'row\.status != "active"']),
 ]
 
 REQUIRED_FILES = [
@@ -343,13 +405,15 @@ REQUIRED_FILES = [
     "tests/test_rls_coverage.py",
     "alembic/versions/0014_outbox_rls_and_bookkeeping.py",
     "tests/test_outbox_isolation.py",
+    "alembic/versions/0015_billing_gate_function.py",
+    "tests/test_lifecycle_gate.py",
 ]
 
 # def test_ count per file, after this round's patches. test_bypass_truth_table
 # parametrizes into 5. Baseline was 96 functions / 100 collected; this round
 # adds two test files (counts filled in once written).
-EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 6 + 4   # +6 RLS coverage +4 outbox isolation
-EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 6 + 4
+EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 6 + 4 + 12   # +12 lifecycle gate
+EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 6 + 4 + 12
 
 
 def _strip_comments(src: str) -> str:
