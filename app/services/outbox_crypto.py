@@ -40,7 +40,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 KEY_BYTES = 32
 NONCE_BYTES = 12
 
-CURRENT_KEY_VERSION = 1
+KEYS_ENV = "OUTBOX_KEYS"
+CURRENT_VERSION_ENV = "OUTBOX_CURRENT_KEY_VERSION"
 
 
 class OutboxCryptoError(RuntimeError):
@@ -55,34 +56,105 @@ class OutboxCryptoError(RuntimeError):
 def _keyring() -> dict[int, bytes]:
     """version -> key, from the environment.
 
-    OUTBOX_KEYS holds `version:hex` pairs, newest last, e.g.
+    OUTBOX_KEYS holds `version:hex` pairs, e.g.
         OUTBOX_KEYS=1:aabb...,2:ccdd...
     A single key is the common case. Multiple entries exist so a rotation can
     still decrypt rows written under the old version.
 
-    The dev default is a fixed all-zero key so the test suite and `make up` work
-    without ceremony. It is refused when APP_ENV says production: a
-    'the key is in the repo' deployment is worse than no encryption, because it
-    reads as protection.
+    THERE IS NO DEFAULT KEY, and the absence of one is the point.
+
+    This used to fall back to a fixed all-zero key whenever OUTBOX_KEYS was
+    unset and APP_ENV did not say production -- which the bundled compose file
+    left unset, so every `make up` encrypted invitation tokens under a key
+    printed in this repository. The ciphertext read as protection and was not.
+
+    The fix is not a narrower branch. A code path that mints a known key cannot
+    be misconfigured into existence if it does not exist, so the branch is gone
+    and the requirement is unconditional. Tests inject their own key; deployment
+    supplies a real one. Nothing infers a key from the fact that nobody set one.
     """
-    raw = os.environ.get("OUTBOX_KEYS", "").strip()
+    raw = os.environ.get(KEYS_ENV, "").strip()
     if not raw:
-        if os.environ.get("APP_ENV", "dev").lower() in {"prod", "production"}:
-            raise OutboxCryptoError(
-                "OUTBOX_KEYS is unset. Refusing the development key in "
-                "production -- outbox token payloads would be readable by "
-                "anyone with the source.")
-        return {CURRENT_KEY_VERSION: b"\x00" * KEY_BYTES}
+        raise OutboxCryptoError(
+            f"{KEYS_ENV} is unset. Set it to `version:hex` pairs, e.g. "
+            f"{KEYS_ENV}=1:$(openssl rand -hex 32). There is no default key.")
 
     keys: dict[int, bytes] = {}
     for part in raw.split(","):
-        version, _, hex_key = part.strip().partition(":")
-        key = bytes.fromhex(hex_key)
+        version, sep, hex_key = part.strip().partition(":")
+        if not sep:
+            raise OutboxCryptoError(
+                f"malformed {KEYS_ENV} entry: expected `version:hex`")
+        try:
+            version_number = int(version)
+        except ValueError:
+            raise OutboxCryptoError(
+                f"key version {version!r} is not an integer") from None
+        try:
+            key = bytes.fromhex(hex_key)
+        except ValueError:
+            # The message names the version, never the material.
+            raise OutboxCryptoError(
+                f"key version {version_number} is not valid hex") from None
         if len(key) != KEY_BYTES:
             raise OutboxCryptoError(
-                f"key version {version} is {len(key)} bytes, expected {KEY_BYTES}")
-        keys[int(version)] = key
+                f"key version {version_number} is {len(key)} bytes, "
+                f"expected {KEY_BYTES}")
+        keys[version_number] = key
     return keys
+
+
+def current_key_version() -> int:
+    """The version new payloads are encrypted under.
+
+    This was the constant `CURRENT_KEY_VERSION = 1`, which made rotation
+    impossible in two directions at once: configuring only a version 2 key made
+    every enqueue fail with "no key for version 1", and configuring both left
+    new events still being written under version 1 forever. A key you cannot
+    stop using is not a key you can rotate away from after a leak.
+
+    The version may be INFERRED only when the keyring holds exactly one key,
+    where there is no other answer it could have. The moment a second key is
+    added the configuration is invalid until someone states which is current --
+    so the silent "still using the old one" outcome is not reachable. Adding a
+    key is exactly the moment the question needs asking, and this makes the
+    system ask it rather than assume.
+    """
+    keys = _keyring()
+    raw = os.environ.get(CURRENT_VERSION_ENV, "").strip()
+
+    if not raw:
+        if len(keys) == 1:
+            return next(iter(keys))
+        raise OutboxCryptoError(
+            f"{CURRENT_VERSION_ENV} is unset and {KEYS_ENV} holds "
+            f"{sorted(keys)}. With more than one key the current version cannot "
+            f"be inferred -- name it, or new events will be written under a "
+            f"version nobody chose.")
+
+    try:
+        version = int(raw)
+    except ValueError:
+        raise OutboxCryptoError(
+            f"{CURRENT_VERSION_ENV}={raw!r} is not an integer") from None
+    if version not in keys:
+        raise OutboxCryptoError(
+            f"{CURRENT_VERSION_ENV}={version} is not in {KEYS_ENV} "
+            f"(which holds {sorted(keys)})")
+    return version
+
+
+def validate_outbox_config() -> int:
+    """Resolve the whole configuration once, at startup, and return the current
+    version.
+
+    _keyring() and current_key_version() are called lazily on every encrypt and
+    decrypt, so a broken configuration would otherwise surface at the first
+    onboarding commit rather than at boot -- an error a user sees instead of an
+    error the deployment sees. Called from app.main's lifespan and from any
+    dispatcher entry point.
+    """
+    return current_key_version()
 
 
 def build_aad(*, event_id: UUID, invitation_id: UUID, partner_id: UUID,
@@ -99,20 +171,41 @@ def build_aad(*, event_id: UUID, invitation_id: UUID, partner_id: UUID,
 
 
 def encrypt_token(token: str, aad: bytes,
-                  key_version: int = CURRENT_KEY_VERSION) -> tuple[bytes, bytes]:
-    """-> (ciphertext, nonce). A fresh random nonce per call: GCM's security
-    collapses if a nonce is ever reused under the same key."""
+                  key_version: int | None = None) -> tuple[bytes, bytes, int]:
+    """-> (ciphertext, nonce, key_version). A fresh random nonce per call: GCM's
+    security collapses if a nonce is ever reused under the same key.
+
+    THE VERSION IS RETURNED, NOT LOOKED UP TWICE.
+
+    enqueue_invitation used to call this and then separately write
+    CURRENT_KEY_VERSION into the row. Two reads of the same fact, agreeing only
+    because both read one constant. Once the version became configurable that
+    stopped being guaranteed, and the failure is invisible at write time: the
+    row records a version it was not encrypted under, and nothing notices until
+    a dispatcher tries to decrypt it -- possibly days later, possibly after the
+    other key is gone.
+
+    So the version travels with the ciphertext it belongs to. The caller cannot
+    record a different one without going out of its way.
+    """
     keys = _keyring()
-    if key_version not in keys:
-        raise OutboxCryptoError(f"no key for version {key_version}")
+    version = current_key_version() if key_version is None else key_version
+    if version not in keys:
+        raise OutboxCryptoError(f"no key for version {version}")
     nonce = os.urandom(NONCE_BYTES)
-    ct = AESGCM(keys[key_version]).encrypt(nonce, token.encode(), aad)
-    return ct, nonce
+    ct = AESGCM(keys[version]).encrypt(nonce, token.encode(), aad)
+    return ct, nonce, version
 
 
 def decrypt_token(ciphertext: bytes, nonce: bytes, aad: bytes,
-                  key_version: int = CURRENT_KEY_VERSION) -> str:
+                  key_version: int) -> str:
     """-> plaintext token, or OutboxCryptoError.
+
+    key_version is REQUIRED. It used to default to the current version, so a
+    caller that forgot to pass the row's stored version would silently try the
+    current key -- which works right up until a rotation, and then fails on
+    exactly the old rows the versioning exists to keep readable. The row always
+    knows its own version; there is no case where guessing is correct.
 
     A mismatched AAD lands here as a failure, which is the intended behaviour:
     a ciphertext that has been moved to another row is not "wrong data", it is

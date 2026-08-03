@@ -106,9 +106,11 @@ def _recipient_now(platform_engine, event_id):
 
 def test_another_tenants_event_is_invisible(ids, partner_ctx, b_event):
     """The ciphertext is AEAD-sealed, but 0013 shipped with a fixed all-zero key
-    whenever OUTBOX_KEYS is unset -- which the bundled compose file leaves
-    unset. So "A can read the row" and "A can recover the token" were the same
-    sentence. The policy is what stops the read.
+    whenever OUTBOX_KEYS was unset -- which the bundled compose file left unset.
+    So "A can read the row" and "A can recover the token" were the same
+    sentence. That fallback is gone now and the keyring is mandatory, but the
+    policy is still what stops the read: a key the operator got right is not a
+    reason for one tenant to hold another's ciphertext.
     """
     with partner_ctx(ids.partner_a) as c:
         rows = c.execute(text(

@@ -11,6 +11,19 @@ from alembic import command
 
 from app.auth.password import hash_password
 
+# The test keyring, injected here rather than defaulted inside the library.
+#
+# outbox_crypto has no fallback key any more: it used to mint a fixed all-zero
+# one whenever OUTBOX_KEYS was unset, which is what made `make up` encrypt real
+# invitation tokens under a key printed in this repository. Putting the test key
+# here keeps the suite self-contained AND keeps the deployment honest -- compose
+# has to be given a real one, because nothing will invent it.
+#
+# Set before any app module reads it. _keyring() resolves lazily at call time,
+# so import order does not matter, but the value must be in place before the
+# first encrypt.
+os.environ.setdefault("OUTBOX_KEYS", "1:" + "11" * 32)
+
 OWNER_URL = os.environ.get(
     "OWNER_DATABASE_URL", "postgresql+psycopg://app_owner:owner_pw@localhost:5432/partner_backend")
 RUNTIME_URL = os.environ.get(

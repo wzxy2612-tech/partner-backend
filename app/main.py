@@ -1,9 +1,27 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from app.routers import (auth, partners, workspaces, onboarding, invitations,
                          activity, branding, workflows, usage, maintenance)
+from app.services.outbox_crypto import validate_outbox_config
 
-app = FastAPI(title="Partner Multi-Tenancy Backend", version="0.5.0")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Resolve the outbox key configuration before serving anything.
+
+    The keyring is read lazily on every encrypt, so a missing or inconsistent
+    configuration would otherwise surface as a 500 on someone's first CSV
+    onboarding rather than as a container that refuses to start. A deployment
+    error should be visible to the deployment.
+    """
+    validate_outbox_config()
+    yield
+
+
+app = FastAPI(title="Partner Multi-Tenancy Backend", version="0.5.0",
+              lifespan=lifespan)
 
 app.include_router(auth.router)
 app.include_router(partners.router)

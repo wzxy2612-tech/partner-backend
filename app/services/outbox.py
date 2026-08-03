@@ -35,8 +35,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session as OrmSession
 
 from app.services.email import EmailSender
-from app.services.outbox_crypto import (CURRENT_KEY_VERSION, OutboxCryptoError,
-                                        build_aad, decrypt_token, encrypt_token)
+from app.services.outbox_crypto import (OutboxCryptoError, build_aad,
+                                        decrypt_token, encrypt_token)
 
 EVENT_INVITATION_CREATED = "invitation.created"
 
@@ -78,7 +78,11 @@ def enqueue_invitation(db: OrmSession, *, partner_id: UUID, invitation_id: UUID,
     event_id = uuid4()
     aad = build_aad(event_id=event_id, invitation_id=invitation_id,
                     partner_id=partner_id, event_type=EVENT_INVITATION_CREATED)
-    ciphertext, nonce = encrypt_token(token, aad)
+    # The version comes back FROM the encryption rather than being looked up
+    # again here. Two lookups agreed only while it was a constant; once it
+    # became configuration, a row recording a version it was not encrypted
+    # under would go unnoticed until a dispatcher failed to decrypt it.
+    ciphertext, nonce, key_version = encrypt_token(token, aad)
 
     db.execute(text(
         "INSERT INTO outbox_events "
@@ -87,7 +91,7 @@ def enqueue_invitation(db: OrmSession, *, partner_id: UUID, invitation_id: UUID,
         "VALUES (:id, :pid, :inv, :et, :rcpt, :ct, :nonce, :kv, 'pending', now())"),
         {"id": str(event_id), "pid": str(partner_id), "inv": str(invitation_id),
          "et": EVENT_INVITATION_CREATED, "rcpt": recipient,
-         "ct": ciphertext, "nonce": nonce, "kv": CURRENT_KEY_VERSION})
+         "ct": ciphertext, "nonce": nonce, "kv": key_version})
     return event_id
 
 

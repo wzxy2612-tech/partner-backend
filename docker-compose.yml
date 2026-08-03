@@ -25,6 +25,13 @@ services:
       OWNER_DATABASE_URL: postgresql+psycopg://app_owner:owner_pw@db:5432/partner_backend
       RUNTIME_DATABASE_URL: postgresql+psycopg://app_runtime:runtime_pw@db:5432/partner_backend
       PLATFORM_DATABASE_URL: postgresql+psycopg://app_platform:platform_pw@db:5432/partner_backend
+      # No default, deliberately. A working key committed here is the thing that
+      # made every `make up` encrypt invitation tokens under a value printed in
+      # this repository. Compose refuses to start without one; generate it with
+      # `openssl rand -hex 32` and export OUTBOX_KEYS=1:<that hex>.
+      OUTBOX_KEYS: ${OUTBOX_KEYS:?OUTBOX_KEYS is required - see .env.example}
+      # Only needed once a second key exists; with one key it is inferred.
+      OUTBOX_CURRENT_KEY_VERSION: ${OUTBOX_CURRENT_KEY_VERSION:-}
     ports:
       - "8000:8000"
     command: >

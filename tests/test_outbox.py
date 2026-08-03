@@ -150,7 +150,10 @@ def test_unauthenticated_payload_dead_letters_immediately(ids, partner_orm):
         foreign_aad = build_aad(event_id=uuid.uuid4(), invitation_id=uuid.uuid4(),
                                 partner_id=ids.partner_a,
                                 event_type=outbox.EVENT_INVITATION_CREATED)
-        ct, nonce = encrypt_token("some-token", foreign_aad)
+        # Three-tuple since the version travels with the ciphertext; the
+        # planted row keeps whatever key_version it already had, which is
+        # the point -- the AAD is what refuses it, not the key.
+        ct, nonce, _kv = encrypt_token("some-token", foreign_aad)
         db.execute(text("UPDATE outbox_events SET token_ciphertext = :c, "
                         "token_nonce = :n WHERE id = :i"),
                    {"c": ct, "n": nonce, "i": str(ids_[0])})

@@ -437,6 +437,34 @@ CHECKS = [
      "alembic/versions/0016_ledger_revoke_platform.py",
      [r'ROLE = "app_platform"', r"REVOKE ALL ON \{BOOKKEEPING\} FROM \{ROLE\}"], []),
 
+    # ---- round 12: key configuration and rotation -----------------------
+    # The constant is gone. A grep for it is the cheapest way to catch it being
+    # reintroduced as "just a default".
+    ("R12 #3 there is no fallback key and no APP_ENV escape hatch",
+     "app/services/outbox_crypto.py",
+     [r"KEYS_ENV = \"OUTBOX_KEYS\"", r"def validate_outbox_config"],
+     [r"CURRENT_KEY_VERSION = 1", r'b"\\x00" \* KEY_BYTES', r"APP_ENV"]),
+
+    # Two reads of one fact: encrypt used the constant, enqueue wrote it again.
+    # The version now travels back with the ciphertext it belongs to.
+    ("R12 #6 encryption reports the version, enqueue records what it reported",
+     "app/services/outbox_crypto.py",
+     [r"def current_key_version", r"return ct, nonce, version"], []),
+
+    ("R12 #6 the row records the version encryption actually used",
+     "app/services/outbox.py",
+     [r"ciphertext, nonce, key_version = encrypt_token\(token, aad\)",
+      r'"kv": key_version'],
+     [r"CURRENT_KEY_VERSION"]),
+
+    ("R12 #3 the deployment must supply a key and .env.example must not",
+     "docker-compose.yml",
+     [r"OUTBOX_KEYS:\?"], []),
+
+    ("R12 startup resolves the key configuration before serving",
+     "app/main.py",
+     [r"validate_outbox_config\(\)", r"lifespan"], []),
+
     ("R9 login consumes the shared predicate instead of its own copy",
      "app/routers/auth.py",
      [r"public\.partner_is_active\(id\)", r"FOR SHARE"],
@@ -470,13 +498,14 @@ REQUIRED_FILES = [
     "tests/test_lifecycle_gate.py",
     "alembic/versions/0016_ledger_revoke_platform.py",
     "tests/test_outbox_claim.py",
+    "tests/test_outbox_keys.py",
 ]
 
 # def test_ count per file, after this round's patches. test_bypass_truth_table
 # parametrizes into 5. Baseline was 96 functions / 100 collected; this round
 # adds two test files (counts filled in once written).
-EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7   # +7 outbox claim
-EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7
+EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10   # +10 outbox keys
+EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10
 
 
 def _strip_comments(src: str) -> str:
