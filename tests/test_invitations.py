@@ -1,7 +1,7 @@
 """Invitation redemption closes the loop with auth: set password + activate."""
 from sqlalchemy import text
 
-from app.services import onboarding
+from app.services import onboarding, outbox
 from app.services.email import OutboxEmailSender
 from app.auth.password import verify_password
 
@@ -9,10 +9,19 @@ CSV = "email,name,role,company\nnewbie@x.test,Newbie,author,Company A\n"
 
 
 def _provision_one(db, ids):
-    outbox = OutboxEmailSender()
-    _, result = onboarding.onboard(db, ids.partner_a, CSV, sender=outbox)
+    """Provision one user and obtain the token the way the real system does:
+    from the outbox, after the invitation exists.
+
+    This used to read the token out of an injected sender, because provision()
+    sent the mail itself. It cannot any more -- the token now travels as
+    encrypted payload on an outbox event, and dispatching is what turns it back
+    into something a recipient could receive."""
+    _, result = onboarding.onboard(db, ids.partner_a, CSV)
     assert result and len(result.created_user_ids) == 1
-    return outbox.sent[0]  # (email, token)
+    captured = OutboxEmailSender()
+    dispatched = outbox.dispatch_pending(db, captured)
+    assert len(dispatched.sent) == 1
+    return captured.sent[0]  # (email, token)
 
 
 def test_accept_sets_password_and_activates(ids, partner_orm):

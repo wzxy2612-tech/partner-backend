@@ -184,6 +184,30 @@ CHECKS = [
     # _strip_comments removes, so SECURITY INVOKER/DEFINER cannot be asserted
     # here. What IS assertable, and is what actually breaks the recursion:
     # partners must not appear in the gated table list.
+    # ---- round 6: outbox ------------------------------------------------
+    ("R6 provision cannot send mail at all",
+     "app/services/onboarding.py",
+     [r"outbox\.enqueue_invitation"], [r"sender\.send_invitation"]),
+
+    ("R6 token is encrypted, never stored plaintext",
+     "app/services/outbox.py", [r"encrypt_token\(token, aad\)"], []),
+
+    ("R6 AAD binds ciphertext to its own row",
+     "app/services/outbox_crypto.py",
+     [r"def build_aad", r"event_id", r"invitation_id", r"partner_id"], []),
+
+    ("R6 dispatcher claims with SKIP LOCKED",
+     "app/services/outbox.py", [r"FOR UPDATE SKIP LOCKED"], []),
+
+    ("R6 delivery clears the secret in the same statement",
+     "app/services/outbox.py",
+     [r"status = 'sent', sent_at = now\(\)",
+      r"token_ciphertext = NULL, token_nonce = NULL"], []),
+
+    ("R6 dead-letter is terminal and clears the secret",
+     "app/services/outbox.py",
+     [r"def _dead_letter", r"status = 'failed'"], []),
+
     # ---- round 5: #11 workspace company boundary ------------------------
     ("R5 #11 parent FK includes company (3 columns)",
      "alembic/versions/0012_workspace_parent_same_company.py",
@@ -265,14 +289,19 @@ REQUIRED_FILES = [
     "tests/test_workspace_company_boundary.py",
     "alembic/versions/0012_workspace_parent_same_company.py",
     "scripts/scan_cross_company_parents.sql",
+    "alembic/versions/0013_outbox_events.py",
+    "app/services/outbox.py",
+    "app/services/outbox_crypto.py",
+    "app/models/outbox_event.py",
+    "tests/test_outbox.py",
     "alembic/versions/0011_rls_active_state_gate.py",
 ]
 
 # def test_ count per file, after this round's patches. test_bypass_truth_table
 # parametrizes into 5. Baseline was 96 functions / 100 collected; this round
 # adds two test files (counts filled in once written).
-EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6   # +8 TOCTOU concurrency tests
-EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6
+EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9   # +outbox   # +8 TOCTOU concurrency tests
+EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9
 
 
 def _strip_comments(src: str) -> str:

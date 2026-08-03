@@ -3,7 +3,6 @@ import pytest
 from sqlalchemy import text
 
 from app.services import onboarding
-from app.services.email import OutboxEmailSender
 
 GOOD_CSV = (
     "email,name,role,company\n"
@@ -50,36 +49,48 @@ def test_validate_flags_every_bad_row(ids, partner_orm):
 
 
 def test_commit_provisions_users_memberships_invites(ids, partner_orm):
-    outbox = OutboxEmailSender()
     with partner_orm(ids.partner_a) as db:
         u0 = db.execute(text("SELECT count(*) FROM users")).scalar_one()
-        report, result = onboarding.onboard(db, ids.partner_a, GOOD_CSV, sender=outbox)
+        report, result = onboarding.onboard(db, ids.partner_a, GOOD_CSV)
         u1 = db.execute(text("SELECT count(*) FROM users")).scalar_one()
         invites = db.execute(text("SELECT count(*) FROM invitations")).scalar_one()
+        events = db.execute(text(
+            "SELECT count(*) FROM outbox_events WHERE status = 'pending'")).scalar_one()
     assert not report.has_errors and result is not None
     assert len(result.created_user_ids) == 2
     assert u1 - u0 == 2
     assert invites == 2
-    assert len(outbox.sent) == 2
+    # One queued event per invitation, written in the same transaction. Nothing
+    # was sent: provision() no longer has a way to send.
+    assert events == 2
 
 
-class _BoomSender:
-    def __init__(self):
-        self.calls = 0
+def test_commit_rolls_back_entire_batch_on_failure(ids, partner_orm, monkeypatch):
+    """The batch is still all-or-nothing -- and now the mail is inside that
+    guarantee rather than beside it.
 
-    def send_invitation(self, email, token):
-        self.calls += 1
-        if self.calls == 2:          # fail partway through the batch
-            raise RuntimeError("smtp down")
+    This test used to inject a sender that raised on row 2, proving the database
+    rolled back. What it could not prove, and what was actually broken, is that
+    row 1's email had ALREADY GONE OUT and could not be recalled: the recipient
+    held a token for a record that no longer existed. The failure is injected at
+    the outbox write instead, because sending is no longer something provision()
+    can do."""
+    def boom(db, **kwargs):
+        boom.calls += 1
+        if boom.calls == 2:
+            raise RuntimeError("outbox write failed")
+        return None
+    boom.calls = 0
+    monkeypatch.setattr(onboarding.outbox, "enqueue_invitation", boom)
 
-
-def test_commit_rolls_back_entire_batch_on_failure(ids, partner_orm):
     with partner_orm(ids.partner_a) as db:
         before = db.execute(text("SELECT count(*) FROM users")).scalar_one()
         report = onboarding.validate(db, onboarding.parse_csv(GOOD_CSV))
         with pytest.raises(RuntimeError):
-            onboarding.provision(db, ids.partner_a, report, _BoomSender())
+            onboarding.provision(db, ids.partner_a, report)
         after = db.execute(text("SELECT count(*) FROM users")).scalar_one()
         invites = db.execute(text("SELECT count(*) FROM invitations")).scalar_one()
-    assert after == before   # row 1 was undone along with the failed row 2
+        events = db.execute(text("SELECT count(*) FROM outbox_events")).scalar_one()
+    assert after == before      # row 1 undone along with the failed row 2
     assert invites == 0
+    assert events == 0          # and no queued mail survives the rollback

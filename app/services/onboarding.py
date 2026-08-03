@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session as OrmSession
 from app.auth.tokens import new_token, hash_token
 from app.auth.password import hash_password
 from app.models.enums import Role
-from app.services.email import EmailSender, ConsoleEmailSender
+from app.services import outbox
 from app.services.activity import record
 
 EXPECTED_COLUMNS = ["email", "name", "role", "company"]
@@ -201,10 +201,18 @@ class ProvisionResult:
     created_user_ids: list[UUID] = field(default_factory=list)
 
 
-def provision(db: OrmSession, partner_id: UUID, report: ValidationReport,
-              sender: EmailSender) -> ProvisionResult:
-    """Insert every valid row's user + membership + invitation atomically. The
-    SAVEPOINT means a failure on any row discards the entire batch."""
+def provision(db: OrmSession, partner_id: UUID,
+              report: ValidationReport) -> ProvisionResult:
+    """Insert every valid row's user + membership + invitation atomically, and
+    record one outbox event per invitation.
+
+    The SAVEPOINT means a failure on any row discards the entire batch --
+    including the outbox events, so a discarded batch sends nothing.
+
+    No `sender` parameter any more, and that is the point: this function cannot
+    send mail, so it cannot produce a side effect the rollback is unable to
+    undo. Delivery is outbox.dispatch_pending(), run after the commit.
+    """
     result = ProvisionResult()
     now = datetime.now(timezone.utc)
     with db.begin_nested():  # SAVEPOINT: all-or-nothing for the batch
@@ -230,26 +238,36 @@ def provision(db: OrmSession, partner_id: UUID, report: ValidationReport,
                 {"uid": str(user_id), "pid": str(partner_id),
                  "cid": str(r.company_id), "role": r.role.value})
             token = new_token()
-            db.execute(text(
+            invitation_id = db.execute(text(
                 "INSERT INTO invitations (partner_id, user_id, email, token_hash, expires_at) "
-                "VALUES (:pid, :uid, :email, :h, :exp)"),
+                "VALUES (:pid, :uid, :email, :h, :exp) RETURNING id"),
                 {"pid": str(partner_id), "uid": str(user_id), "email": r.email,
-                 "h": hash_token(token), "exp": now + INVITE_TTL})
-            sender.send_invitation(r.email, token)  # raises here -> whole SAVEPOINT rolls back
+                 "h": hash_token(token), "exp": now + INVITE_TTL}).scalar_one()
+
+            # The intent to mail is recorded in THIS transaction, next to the
+            # invitation it belongs to. Nothing is sent here.
+            #
+            # This line used to be sender.send_invitation(...), inside the
+            # SAVEPOINT. A failure on any later row rolled back every user and
+            # invitation -- but the mail already sent could not be recalled, so
+            # earlier recipients held tokens for records that no longer existed.
+            # "All or nothing" was only true of the half of the world the
+            # transaction controls.
+            outbox.enqueue_invitation(
+                db, partner_id=partner_id, invitation_id=invitation_id,
+                recipient=r.email, token=token)
             result.created_user_ids.append(user_id)
     return result
 
 
 def onboard(db: OrmSession, partner_id: UUID, raw_csv: str,
-            sender: EmailSender | None = None,
             globally_taken: set[str] | None = None) -> tuple[ValidationReport, ProvisionResult | None]:
     """Validate then, only if clean, provision. Returns (report, result|None)."""
-    sender = sender or ConsoleEmailSender()
     rows = parse_csv(raw_csv)
     report = validate(db, rows, globally_taken)
     if report.has_errors:
         return report, None
-    result = provision(db, partner_id, report, sender)
+    result = provision(db, partner_id, report)
     record(db, partner_id, "partner.users_onboarded",
            payload={"count": len(result.created_user_ids)})
     return report, result

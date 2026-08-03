@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (String, DateTime, ForeignKey, ForeignKeyConstraint,
-                        CheckConstraint, Index, func)
+                        CheckConstraint, Index, UniqueConstraint, func)
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -15,6 +15,8 @@ class Invitation(Base):
     __tablename__ = "invitations"
     __table_args__ = (
         Index("ix_invitations_partner_id", "partner_id"),
+        # 0013: target for the outbox event's tenant-composite FK.
+        UniqueConstraint("id", "partner_id", name="uq_invitations_id_partner"),
         ForeignKeyConstraint(
             ["user_id", "partner_id"], ["users.id", "users.partner_id"],
             ondelete="CASCADE", name="fk_invitations_user_id_partner"),

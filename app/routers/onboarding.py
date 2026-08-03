@@ -5,7 +5,6 @@ from app.deps import require_partner, session_for_principal, enforce
 from app.auth.principal import Principal
 from app.models.enums import ScopeType
 from app.services.rbac import Permission
-from app.services.email import ConsoleEmailSender
 from app.services import onboarding
 from app.db import platform_session
 
@@ -57,8 +56,7 @@ def commit(body: CsvBody, principal: Principal = Depends(require_partner)) -> di
         enforce(db, principal, Permission.manage_users, ScopeType.partner, principal.partner_id)
         try:
             report, result = onboarding.onboard(
-                db, principal.partner_id, body.csv,
-                sender=ConsoleEmailSender(), globally_taken=taken)
+                db, principal.partner_id, body.csv, globally_taken=taken)
         except onboarding.EmailAlreadyRegistered as exc:
             # Lost the race between validate and INSERT. 409 rather than 500,
             # and the whole batch has already rolled back with it -- the caller
