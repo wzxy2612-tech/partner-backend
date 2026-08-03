@@ -465,6 +465,32 @@ CHECKS = [
      "app/main.py",
      [r"validate_outbox_config\(\)", r"lifespan"], []),
 
+    # ---- round 13: 0017, the state machine as constraints ---------------
+    # The old check said nothing about `failed` and never mentioned the nonce.
+    # Three named constraints, because this codebase reads diag.constraint_name
+    # rather than parsing message text.
+    ("R13 #7 every terminal state is constrained, and the old check is gone",
+     "alembic/versions/0017_outbox_terminal_invariants.py",
+     [r"ck_outbox_pending_has_payload", r"ck_outbox_sent_is_clean",
+      r"ck_outbox_failed_is_clean", r"DROP CONSTRAINT IF EXISTS \{OLD_CHECK\}"],
+     []),
+
+    # A per-partner GUC loop cannot reach a suspended partner's rows -- the
+    # policy gates on partner_is_active too -- so the backfill lifts FORCE for
+    # the length of the transaction and asserts it back on.
+    ("R13 #7 the backfill can actually see the rows, and restores FORCE",
+     "alembic/versions/0017_outbox_terminal_invariants.py",
+     # relforcerowsecurity lives in a triple-quoted SQL block that
+     # _strip_comments removes; the Python that reads it does not.
+     [r"NO FORCE ROW LEVEL SECURITY", r"FORCE ROW LEVEL SECURITY",
+      r"if not state\.forced", r"REFUSALS"], []),
+
+    ("R13 #7 the invariants are pinned by constraint name, not message text",
+     "tests/test_outbox_invariants.py",
+     [r'_constraint\(exc\) == "ck_outbox_failed_is_clean"',
+      r'_constraint\(exc\) == "ck_outbox_pending_has_payload"',
+      r"def test_every_real_transition_produces_a_legal_row"], []),
+
     ("R9 login consumes the shared predicate instead of its own copy",
      "app/routers/auth.py",
      [r"public\.partner_is_active\(id\)", r"FOR SHARE"],
@@ -499,13 +525,16 @@ REQUIRED_FILES = [
     "alembic/versions/0016_ledger_revoke_platform.py",
     "tests/test_outbox_claim.py",
     "tests/test_outbox_keys.py",
+    "alembic/versions/0017_outbox_terminal_invariants.py",
+    "tests/test_outbox_invariants.py",
+    "scripts/scan_outbox_invariants.sql",
 ]
 
 # def test_ count per file, after this round's patches. test_bypass_truth_table
 # parametrizes into 5. Baseline was 96 functions / 100 collected; this round
 # adds two test files (counts filled in once written).
-EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10   # +10 outbox keys
-EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10
+EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6   # +6 outbox invariants
+EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6
 
 
 def _strip_comments(src: str) -> str:
