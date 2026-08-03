@@ -376,6 +376,15 @@ CHECKS = [
 
     # An empty user_ids list means "matched nobody" and must not be read as
     # "no narrowing", which would revoke the whole partner's invitations.
+    # A threaded "race" test that never actually blocks is the sequential test
+    # wearing a disguise, and it passes just as green. The wait assertion is
+    # what makes the overlap a fact rather than a hope.
+    ("R9 the redemption races assert the transactions actually overlapped",
+     "tests/test_toctou_lifecycle.py",
+     [r"def _wait_until_blocked", r"wait_event_type = 'Lock'",
+      r"assert _wait_until_blocked\(engine\)",
+      r"threading\.Thread"], []),
+
     ("R9 login consumes the shared predicate instead of its own copy",
      "app/routers/auth.py",
      [r"public\.partner_is_active\(id\)", r"FOR SHARE"],
@@ -412,8 +421,8 @@ REQUIRED_FILES = [
 # def test_ count per file, after this round's patches. test_bypass_truth_table
 # parametrizes into 5. Baseline was 96 functions / 100 collected; this round
 # adds two test files (counts filled in once written).
-EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 6 + 4 + 12   # +12 lifecycle gate
-EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 6 + 4 + 12
+EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 6 + 4 + 12 + 2   # +2 redemption races
+EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 6 + 4 + 12 + 2
 
 
 def _strip_comments(src: str) -> str:

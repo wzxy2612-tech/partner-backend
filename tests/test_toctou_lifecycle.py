@@ -20,10 +20,29 @@ What each one pins:
     reactivation cannot silently revive a token created while suspended.
   * activate vs purge -- whoever takes the partner row lock first decides. Both
     succeeding is the failure this rules out.
+  * suspend vs redemption, and domain-deactivate vs redemption -- these two
+    OVERLAP the transactions rather than sequencing them. The activate/purge
+    test above commits one side before the other starts, which pins the
+    committed-order case but never makes anything block. accept_invitation
+    takes no lock on partners (SELECT FOR SHARE needs UPDATE privilege there,
+    which the runtime role lost in 0015), so what orders it against a lifecycle
+    transition is the invitation's own status -- a column on the row the UPDATE
+    already locks. That is a claim about PostgreSQL re-evaluating a qual when a
+    conflicting transaction commits, and it was reasoning, not evidence, until
+    these two.
 """
+import threading
+import time
 import uuid
+from types import SimpleNamespace
+
 import pytest
 from sqlalchemy import text
+from sqlalchemy.orm import sessionmaker
+
+from app.auth.tokens import hash_token
+from app.services.onboarding import accept_invitation
+from app.services.partners import suspend_partner, deactivate_domain
 
 
 @pytest.fixture()
@@ -323,4 +342,174 @@ def test_activate_and_purge_cannot_both_win(temp_partner, platform_engine):
     with platform_engine.connect() as c:
         assert c.execute(text("SELECT count(*) FROM partners WHERE id = :p"),
                          {"p": str(pid)}).scalar_one() == 1
+        c.rollback()
+
+
+# --- redemption vs the lifecycle transitions --------------------------------
+
+RACE_DOMAIN = "race.test"
+RACE_PASSWORD = "correct-horse-battery-staple"
+
+
+@pytest.fixture()
+def pending_invite(temp_partner, platform_engine):
+    """A committed inactive invitee, pending invitation, and queued mail.
+
+    Committed, because a race needs two connections and one transaction cannot
+    see another's rows. Torn down explicitly: temp_partner's teardown would
+    reach these through ON DELETE CASCADE, but this fixture created them and
+    leaning on a cascade it did not declare is how leftover rows outlive the
+    test that made them.
+    """
+    pid, _ = temp_partner
+    uid, inv_id, ev_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    token = f"race-{uuid.uuid4().hex}"
+    email = f"invitee-{uid}@{RACE_DOMAIN}"
+
+    with platform_engine.connect() as c:
+        c.execute(text(
+            "INSERT INTO users (id, email, partner_id, billing_source, is_active) "
+            "VALUES (:u, :e, :p, 'partner', false)"),
+            {"u": str(uid), "e": email, "p": str(pid)})
+        c.execute(text(
+            "INSERT INTO invitations (id, partner_id, user_id, email, token_hash, "
+            "status, expires_at) VALUES "
+            "(:i, :p, :u, :e, :h, 'pending', now() + interval '7 days')"),
+            {"i": str(inv_id), "p": str(pid), "u": str(uid), "e": email,
+             "h": hash_token(token)})
+        c.execute(text(
+            "INSERT INTO outbox_events (id, partner_id, invitation_id, event_type, "
+            "recipient, token_ciphertext, token_nonce, key_version, status) VALUES "
+            "(:v, :p, :i, 'invitation.created', :e, :c, :n, 1, 'pending')"),
+            {"v": str(ev_id), "p": str(pid), "i": str(inv_id), "e": email,
+             "c": b"race-ciphertext", "n": b"race-nonce1"})
+        c.commit()
+
+    yield SimpleNamespace(partner_id=pid, token=token, user_id=uid,
+                          invitation_id=inv_id, event_id=ev_id, email=email)
+
+    with platform_engine.connect() as c:
+        c.execute(text("DELETE FROM outbox_events WHERE id = :v"), {"v": str(ev_id)})
+        c.execute(text("DELETE FROM invitations WHERE id = :i"), {"i": str(inv_id)})
+        c.execute(text("DELETE FROM users WHERE id = :u"), {"u": str(uid)})
+        c.commit()
+
+
+def _wait_until_blocked(engine, timeout=5.0):
+    """Wait for one of our backends to be stuck on a lock.
+
+    Polling for the observable condition rather than sleeping a fixed interval:
+    a sleep long enough to be reliable on a loaded machine is also long enough
+    to hide the case where nothing ever blocked. pg_stat_activity shows
+    wait_event_type for backends belonging to the same role, and every
+    connection here is app_platform.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with engine.connect() as c:
+            waiting = c.execute(text(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE datname = current_database() "
+                "  AND wait_event_type = 'Lock'")).scalar_one()
+            c.rollback()
+        if waiting:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _redeem_while(engine, transition, token):
+    """Hold `transition` open, start a redemption that must block on it, then
+    commit and report what the redemption decided.
+
+    The assertion that the redemption actually WAITED is the load-bearing one.
+    Without it this is two statements that happened to run in some order, and it
+    would pass just as green if the lifecycle transition had finished before the
+    redemption ever started -- which is the sequential case already covered
+    elsewhere, wearing a thread as a disguise.
+    """
+    Maker = sessionmaker(bind=engine, expire_on_commit=False)
+    outcome = {}
+
+    def redeem():
+        db = Maker()
+        try:
+            outcome["accepted"] = accept_invitation(db, token, RACE_PASSWORD)
+            db.commit()
+        except BaseException as exc:  # reported below, never swallowed
+            outcome["error"] = exc
+        finally:
+            db.close()
+
+    blocker = Maker()
+    worker = threading.Thread(target=redeem, daemon=True)
+    try:
+        transition(blocker)          # takes the invitation row lock, uncommitted
+        worker.start()
+        assert _wait_until_blocked(engine), (
+            "the redemption never waited on a lock, so the two transactions did "
+            "not overlap and this proves nothing about the race")
+        blocker.commit()
+    finally:
+        try:
+            blocker.rollback()       # no-op after a successful commit
+        finally:
+            blocker.close()
+        worker.join(timeout=15)
+
+    assert not worker.is_alive(), "the redemption never finished"
+    assert "error" not in outcome, f"redemption raised: {outcome.get('error')!r}"
+    return outcome["accepted"]
+
+
+def test_suspend_and_redemption_cannot_both_win(pending_invite, platform_engine):
+    """The redemption is mid-flight when the suspension commits underneath it.
+
+    Its UPDATE has already matched the invitation -- pending, unexpired, partner
+    still active in its snapshot -- and is waiting for the row lock. What decides
+    the outcome is what PostgreSQL re-checks when it unblocks. The partner check
+    may well still read the pre-suspend state; `status = 'pending'` is on the
+    target row, and suspension moved it to `revoked` in the same transaction.
+    """
+    accepted = _redeem_while(
+        platform_engine,
+        lambda db: suspend_partner(db, pending_invite.partner_id),
+        pending_invite.token)
+    assert accepted is False
+
+    with platform_engine.connect() as c:
+        assert c.execute(text("SELECT status FROM invitations WHERE id = :i"),
+                         {"i": str(pending_invite.invitation_id)}).scalar_one() == "revoked"
+        assert c.execute(text("SELECT is_active FROM users WHERE id = :u"),
+                         {"u": str(pending_invite.user_id)}).scalar_one() is False
+        assert c.execute(text("SELECT status FROM partners WHERE id = :p"),
+                         {"p": str(pending_invite.partner_id)}).scalar_one() == "suspended"
+        c.rollback()
+
+
+def test_domain_deactivation_and_redemption_cannot_both_win(pending_invite, platform_engine):
+    """Same overlap, the other transition.
+
+    Worth its own test rather than a parametrise: domain deactivation reaches
+    the invitation by a different route -- scan users on the domain, then narrow
+    the revocation to those user ids -- and that narrowing is where an empty
+    match, a stale is_active filter, or a lost user would silently leave the
+    invitation pending while the operator was told the domain was handled.
+    """
+    accepted = _redeem_while(
+        platform_engine,
+        lambda db: deactivate_domain(db, pending_invite.partner_id, RACE_DOMAIN),
+        pending_invite.token)
+    assert accepted is False
+
+    with platform_engine.connect() as c:
+        assert c.execute(text("SELECT status FROM invitations WHERE id = :i"),
+                         {"i": str(pending_invite.invitation_id)}).scalar_one() == "revoked"
+        assert c.execute(text("SELECT is_active FROM users WHERE id = :u"),
+                         {"u": str(pending_invite.user_id)}).scalar_one() is False
+        # And the mail for a revoked invitation is terminal and secret-free.
+        ev = c.execute(text(
+            "SELECT status, token_ciphertext FROM outbox_events WHERE id = :v"),
+            {"v": str(pending_invite.event_id)}).one()
+        assert ev.status == "failed" and ev.token_ciphertext is None
         c.rollback()
