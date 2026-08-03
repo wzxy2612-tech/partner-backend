@@ -273,6 +273,51 @@ CHECKS = [
      "alembic/versions/0011_rls_active_state_gate.py",
      [r'PARTNER_ID_TABLES = \['],
      [r'"partners",']),
+
+    # ---- round 7: grant-driven RLS coverage -----------------------------
+    # The SQL in this file lives in triple-quoted blocks, which _strip_comments
+    # removes -- so has_any_column_privilege / pg_class cannot be asserted here.
+    # What IS assertable is the shape that makes the guard independent: it owns
+    # a column-grant scan, and it does not borrow any inventory from the code it
+    # audits.
+    ("R7 coverage guard does not borrow the migration's table list",
+     "tests/test_rls_coverage.py",
+     [r"COLUMN_GRANT_SQL", r"def reachable", r"def writable"],
+     [r"PARTNER_ID_TABLES"]),
+
+    ("R7 coverage guard pins its exemptions in BOTH directions",
+     "tests/test_rls_coverage.py",
+     [r"NOT_FORCED - actually_unforced", r"actually_unforced - NOT_FORCED",
+      r"PARTNERS_RUNTIME_COLUMNS"], []),
+
+    ("R7 coverage guard is anchored against a vacuous pass",
+     "tests/test_rls_coverage.py",
+     [r"anchors = \{", r"assert scan\.policies"], []),
+
+    # ---- round 8: 0014, outbox row security -----------------------------
+    ("R8 #1 0014 both enables and forces row security on outbox_events",
+     "alembic/versions/0014_outbox_rls_and_bookkeeping.py",
+     [r"ALTER TABLE outbox_events ENABLE ROW LEVEL SECURITY",
+      r"ALTER TABLE outbox_events FORCE ROW LEVEL SECURITY"], []),
+
+    ("R8 #1 the policy is gated and keeps 0004's empty-GUC hardening",
+     "alembic/versions/0014_outbox_rls_and_bookkeeping.py",
+     [r"NULLIF\(current_setting\('app\.partner_id', true\), ''\)::uuid",
+      r"partner_is_active\(\{GUC\}\)",
+      r"USING \(\{PREDICATE\}\) WITH CHECK \(\{PREDICATE\}\)"], []),
+
+    ("R8 alembic_version is revoked from the runtime role",
+     "alembic/versions/0014_outbox_rls_and_bookkeeping.py",
+     [r'BOOKKEEPING = "alembic_version"',
+      r"REVOKE ALL ON \{BOOKKEEPING\} FROM app_runtime"], []),
+
+    # A blocked UPDATE under RLS raises nothing -- it affects zero rows. A test
+    # that only asserts rowcount proves the write was refused but not that the
+    # victim's value survived, and one that only re-reads proves the opposite.
+    ("R8 the redirect test asserts rowcount AND the surviving value",
+     "tests/test_outbox_isolation.py",
+     [r"result\.rowcount == 0", r"_recipient_now\(platform_engine",
+      r"scalar_one\(\) == 1", r'== "42501"'], []),
 ]
 
 REQUIRED_FILES = [
@@ -295,13 +340,16 @@ REQUIRED_FILES = [
     "app/models/outbox_event.py",
     "tests/test_outbox.py",
     "alembic/versions/0011_rls_active_state_gate.py",
+    "tests/test_rls_coverage.py",
+    "alembic/versions/0014_outbox_rls_and_bookkeeping.py",
+    "tests/test_outbox_isolation.py",
 ]
 
 # def test_ count per file, after this round's patches. test_bypass_truth_table
 # parametrizes into 5. Baseline was 96 functions / 100 collected; this round
 # adds two test files (counts filled in once written).
-EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9   # +outbox   # +8 TOCTOU concurrency tests
-EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9
+EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 6 + 4   # +6 RLS coverage +4 outbox isolation
+EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 6 + 4
 
 
 def _strip_comments(src: str) -> str:
