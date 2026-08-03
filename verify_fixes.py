@@ -340,10 +340,15 @@ CHECKS = [
     # A blocked UPDATE under RLS raises nothing -- it affects zero rows. A test
     # that only asserts rowcount proves the write was refused but not that the
     # victim's value survived, and one that only re-reads proves the opposite.
-    ("R8 the redirect test asserts rowcount AND the surviving value",
+    # Was [r"result\.rowcount == 0"]. Under 0014 a blocked UPDATE affected zero
+    # rows; under 0019 the runtime role has no UPDATE at all and it raises. The
+    # surviving-value read stays either way -- an exception says the statement
+    # was refused, only the read says nothing else got there first.
+    ("R8 the redirect test asserts the refusal AND the surviving value",
      "tests/test_outbox_isolation.py",
-     [r"result\.rowcount == 0", r"_recipient_now\(platform_engine",
-      r"scalar_one\(\) == 1", r'== "42501"'], []),
+     [r"_recipient_now\(platform_engine", r"scalar_one\(\) == 1",
+      r'_sqlstate\(exc\) == "42501"'],
+     [r"result\.rowcount == 0"]),
     # ---- round 9: 0015, the gate gets a second consumer -----------------
     # The function body lives in a triple-quoted block that _strip_comments
     # removes, so SECURITY DEFINER / GET DIAGNOSTICS cannot be asserted here.
@@ -525,6 +530,34 @@ CHECKS = [
       r'\("app_dispatcher", "invitations"\)',
       r'\("app_dispatcher", "partners"\)'], []),
 
+    # ---- round 15: the runtime path becomes append-only -----------------
+    # "we granted a list" and "nothing outside the list is reachable" are
+    # different claims; only the second one matters, so FORBIDDEN is checked
+    # column by column rather than inferred from the grant.
+    ("R15 the runtime role may only queue, never read or amend",
+     "alembic/versions/0019_runtime_outbox_insert_only.py",
+     [r"REVOKE ALL ON outbox_events FROM \{ROLE\}", r"FORBIDDEN = \[",
+      r"can_read", r"can_update", r"can_delete"], []),
+    # No MUST_NOT here on purpose. A migration contains the inverse of its own
+    # change, in downgrade() -- so "this file must not mention GRANT SELECT" is
+    # structurally wrong for a migration, and the first version of this check
+    # forbade a correct downgrade. The runtime assertion in the postflight is
+    # the guard; a text check cannot tell which function a line is in.
+
+    # status and available_at carry server defaults and are not granted, so a
+    # tenant has no column through which to express a non-pending event.
+    ("R15 enqueue stops naming the columns it is no longer granted",
+     "app/services/outbox.py",
+     [r"token_ciphertext, token_nonce, key_version\) "],
+     [r"key_version, status, available_at", r"'pending', now\(\)\)"]),
+
+    # permission-denied and RLS-violation share SQLSTATE 42501, so the forge
+    # test proves the grant exists before attributing the refusal to the policy.
+    ("R15 the forge test separates the grant from the policy",
+     "tests/test_outbox_isolation.py",
+     [r"own_invitation_id", r"insert = text\(",
+      r'"p": str\(ids\.partner_a\)'], []),
+
     ("R9 login consumes the shared predicate instead of its own copy",
      "app/routers/auth.py",
      [r"public\.partner_is_active\(id\)", r"FOR SHARE"],
@@ -566,6 +599,7 @@ REQUIRED_FILES = [
     "app/dispatcher.py",
     "scripts/provision_dispatcher_role.sql",
     "tests/test_dispatcher_role.py",
+    "alembic/versions/0019_runtime_outbox_insert_only.py",
 ]
 
 # def test_ count per file, after this round's patches. test_bypass_truth_table

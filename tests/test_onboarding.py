@@ -48,14 +48,22 @@ def test_validate_flags_every_bad_row(ids, partner_orm):
     assert any("already registered" in e for e in errs[6])
 
 
-def test_commit_provisions_users_memberships_invites(ids, partner_orm):
-    with partner_orm(ids.partner_a) as db:
+def test_commit_provisions_users_memberships_invites(ids, platform_orm):
+    with platform_orm() as db:
         u0 = db.execute(text("SELECT count(*) FROM users")).scalar_one()
         report, result = onboarding.onboard(db, ids.partner_a, GOOD_CSV)
         u1 = db.execute(text("SELECT count(*) FROM users")).scalar_one()
-        invites = db.execute(text("SELECT count(*) FROM invitations")).scalar_one()
+        # Scoped explicitly. This test moved to the platform path when 0019 took
+        # SELECT on outbox_events away from the runtime role, and BYPASSRLS means
+        # an unscoped count is a count of every tenant -- which happens to be
+        # right only while the seed fixture leaves the table empty.
+        invites = db.execute(text(
+            "SELECT count(*) FROM invitations WHERE partner_id = :p"),
+            {"p": str(ids.partner_a)}).scalar_one()
         events = db.execute(text(
-            "SELECT count(*) FROM outbox_events WHERE status = 'pending'")).scalar_one()
+            "SELECT count(*) FROM outbox_events "
+            "WHERE partner_id = :p AND status = 'pending'"),
+            {"p": str(ids.partner_a)}).scalar_one()
     assert not report.has_errors and result is not None
     assert len(result.created_user_ids) == 2
     assert u1 - u0 == 2
@@ -65,7 +73,7 @@ def test_commit_provisions_users_memberships_invites(ids, partner_orm):
     assert events == 2
 
 
-def test_commit_rolls_back_entire_batch_on_failure(ids, partner_orm, monkeypatch):
+def test_commit_rolls_back_entire_batch_on_failure(ids, platform_orm, monkeypatch):
     """The batch is still all-or-nothing -- and now the mail is inside that
     guarantee rather than beside it.
 
@@ -83,14 +91,18 @@ def test_commit_rolls_back_entire_batch_on_failure(ids, partner_orm, monkeypatch
     boom.calls = 0
     monkeypatch.setattr(onboarding.outbox, "enqueue_invitation", boom)
 
-    with partner_orm(ids.partner_a) as db:
+    with platform_orm() as db:
         before = db.execute(text("SELECT count(*) FROM users")).scalar_one()
         report = onboarding.validate(db, onboarding.parse_csv(GOOD_CSV))
         with pytest.raises(RuntimeError):
             onboarding.provision(db, ids.partner_a, report)
         after = db.execute(text("SELECT count(*) FROM users")).scalar_one()
-        invites = db.execute(text("SELECT count(*) FROM invitations")).scalar_one()
-        events = db.execute(text("SELECT count(*) FROM outbox_events")).scalar_one()
+        invites = db.execute(text(
+            "SELECT count(*) FROM invitations WHERE partner_id = :p"),
+            {"p": str(ids.partner_a)}).scalar_one()
+        events = db.execute(text(
+            "SELECT count(*) FROM outbox_events WHERE partner_id = :p"),
+            {"p": str(ids.partner_a)}).scalar_one()
     assert after == before      # row 1 undone along with the failed row 2
     assert invites == 0
     assert events == 0          # and no queued mail survives the rollback

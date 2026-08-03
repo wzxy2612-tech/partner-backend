@@ -24,8 +24,8 @@ def _provision_one(db, ids):
     return captured.sent[0]  # (email, token)
 
 
-def test_accept_sets_password_and_activates(ids, partner_orm):
-    with partner_orm(ids.partner_a) as db:
+def test_accept_sets_password_and_activates(ids, platform_orm):
+    with platform_orm() as db:
         email, token = _provision_one(db, ids)
         active, pw = db.execute(
             text("SELECT is_active, hashed_password FROM users WHERE email = :e"),
@@ -49,8 +49,8 @@ def test_accept_rejects_unknown_token(ids, partner_orm):
         assert onboarding.accept_invitation(db, "not-a-token", "x") is False
 
 
-def test_accept_cannot_be_reused(ids, partner_orm):
-    with partner_orm(ids.partner_a) as db:
+def test_accept_cannot_be_reused(ids, platform_orm):
+    with platform_orm() as db:
         _, token = _provision_one(db, ids)
         assert onboarding.accept_invitation(db, token, "pw1") is True
         assert onboarding.accept_invitation(db, token, "pw2") is False  # already accepted

@@ -33,21 +33,23 @@ class _Boom:
 
 # --- the guarantee ----------------------------------------------------------
 
-def test_rollback_leaves_no_invitation_and_nothing_to_send(ids, partner_orm):
+def test_rollback_leaves_no_invitation_and_nothing_to_send(ids, platform_orm):
     """The whole point. When the batch rolls back, the queued mail goes with it,
     because the event was written in the same transaction as the invitation.
 
     Previously the database rolled back and the already-sent mail did not --
     that asymmetry is what made "all or nothing" untrue."""
-    with partner_orm(ids.partner_a) as db:
+    with platform_orm() as db:
         sp = db.begin_nested()
         onboarding.onboard(db, ids.partner_a, CSV)
         assert db.execute(text(
-            "SELECT count(*) FROM outbox_events")).scalar_one() == 2
+            "SELECT count(*) FROM outbox_events WHERE partner_id = :p"),
+            {"p": str(ids.partner_a)}).scalar_one() == 2
         sp.rollback()
 
         assert db.execute(text(
-            "SELECT count(*) FROM outbox_events")).scalar_one() == 0
+            "SELECT count(*) FROM outbox_events WHERE partner_id = :p"),
+            {"p": str(ids.partner_a)}).scalar_one() == 0
         assert db.execute(text(
             "SELECT count(*) FROM invitations WHERE email LIKE 'ob%@x.test'"
         )).scalar_one() == 0
@@ -58,8 +60,8 @@ def test_rollback_leaves_no_invitation_and_nothing_to_send(ids, partner_orm):
         assert captured.sent == []
 
 
-def test_dispatch_delivers_committed_events(ids, partner_orm):
-    with partner_orm(ids.partner_a) as db:
+def test_dispatch_delivers_committed_events(ids, platform_orm):
+    with platform_orm() as db:
         onboarding.onboard(db, ids.partner_a, CSV)
         captured = OutboxEmailSender()
         result = outbox.dispatch_pending(db, captured)
@@ -69,10 +71,10 @@ def test_dispatch_delivers_committed_events(ids, partner_orm):
     assert all(tok for _e, tok in captured.sent), "a real token must be delivered"
 
 
-def test_delivery_destroys_the_stored_secret(ids, partner_orm):
+def test_delivery_destroys_the_stored_secret(ids, platform_orm):
     """A sent event must not keep a redeemable token. 0013 enforces the pairing
     as a CHECK, so this also proves the dispatcher satisfies it."""
-    with partner_orm(ids.partner_a) as db:
+    with platform_orm() as db:
         onboarding.onboard(db, ids.partner_a, CSV)
         outbox.dispatch_pending(db, OutboxEmailSender())
         rows = db.execute(text(
@@ -86,10 +88,10 @@ def test_delivery_destroys_the_stored_secret(ids, partner_orm):
 
 # --- failure handling -------------------------------------------------------
 
-def test_failure_keeps_the_payload_and_backs_off(ids, partner_orm):
+def test_failure_keeps_the_payload_and_backs_off(ids, platform_orm):
     """A retry must still be possible, so the ciphertext survives a failure --
     and the next attempt is scheduled into the future rather than spun on."""
-    with partner_orm(ids.partner_a) as db:
+    with platform_orm() as db:
         onboarding.onboard(db, ids.partner_a, CSV)
         result = outbox.dispatch_pending(db, _Boom())
         assert len(result.retried) == 2
@@ -105,10 +107,10 @@ def test_failure_keeps_the_payload_and_backs_off(ids, partner_orm):
     assert all("smtp down" in r.last_error for r in rows)
 
 
-def test_stored_error_never_contains_the_token(ids, partner_orm):
+def test_stored_error_never_contains_the_token(ids, platform_orm):
     """A failure message is written to the row. It must describe the failure,
     not the payload."""
-    with partner_orm(ids.partner_a) as db:
+    with platform_orm() as db:
         onboarding.onboard(db, ids.partner_a, CSV)
         tokens = {t for _e, t in _peek_tokens(db)}
         outbox.dispatch_pending(db, _Boom())
@@ -119,11 +121,11 @@ def test_stored_error_never_contains_the_token(ids, partner_orm):
             assert tok not in err
 
 
-def test_reaching_the_attempt_limit_dead_letters(ids, partner_orm):
+def test_reaching_the_attempt_limit_dead_letters(ids, platform_orm):
     """Retrying forever is not a policy. At MAX_ATTEMPTS the event stops, keeps
     its history for inspection, and drops its secret material -- a permanently
     undeliverable row has no reason to remain redeemable."""
-    with partner_orm(ids.partner_a) as db:
+    with platform_orm() as db:
         onboarding.onboard(db, ids.partner_a, CSV)
         for _ in range(outbox.MAX_ATTEMPTS):
             db.execute(text("UPDATE outbox_events SET available_at = now() "
@@ -138,12 +140,12 @@ def test_reaching_the_attempt_limit_dead_letters(ids, partner_orm):
     assert all(r.token_ciphertext is None for r in rows)
 
 
-def test_unauthenticated_payload_dead_letters_immediately(ids, partner_orm):
+def test_unauthenticated_payload_dead_letters_immediately(ids, platform_orm):
     """A ciphertext that does not belong to its row cannot be fixed by retrying,
     so it must not consume attempts. This is the AAD binding observed from the
     dispatcher's side: moving a valid ciphertext onto another event makes it
     undeliverable rather than making it deliver someone else's token."""
-    with partner_orm(ids.partner_a) as db:
+    with platform_orm() as db:
         onboarding.onboard(db, ids.partner_a, CSV)
         ids_ = db.execute(text("SELECT id FROM outbox_events ORDER BY id")).scalars().all()
         # Re-encrypt a token under a DIFFERENT event's identity, then plant it.
@@ -168,8 +170,8 @@ def test_unauthenticated_payload_dead_letters_immediately(ids, partner_orm):
 
 # --- idempotence and concurrency -------------------------------------------
 
-def test_a_sent_event_is_not_sent_again(ids, partner_orm):
-    with partner_orm(ids.partner_a) as db:
+def test_a_sent_event_is_not_sent_again(ids, platform_orm):
+    with platform_orm() as db:
         onboarding.onboard(db, ids.partner_a, CSV)
         first = outbox.dispatch_pending(db, OutboxEmailSender())
         second_capture = OutboxEmailSender()

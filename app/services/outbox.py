@@ -73,6 +73,13 @@ def enqueue_invitation(db: OrmSession, *, partner_id: UUID, invitation_id: UUID,
     The row id is generated here rather than by the database default, because
     the AAD binds the ciphertext to that id and it therefore has to be known
     before the ciphertext is computed.
+
+    `status` and `available_at` are deliberately not named. Both carry server
+    defaults ('pending', now()), and 0019 does not grant the runtime role INSERT
+    on either column -- so a tenant cannot express a non-pending or future-dated
+    event at all. Not "is rejected if it tries": there is no column for it to
+    write through. Restating the defaults here would work today and would make
+    the grant look wider than it is to whoever reads this next.
     """
     from uuid import uuid4
     event_id = uuid4()
@@ -87,8 +94,8 @@ def enqueue_invitation(db: OrmSession, *, partner_id: UUID, invitation_id: UUID,
     db.execute(text(
         "INSERT INTO outbox_events "
         "(id, partner_id, invitation_id, event_type, recipient, "
-        " token_ciphertext, token_nonce, key_version, status, available_at) "
-        "VALUES (:id, :pid, :inv, :et, :rcpt, :ct, :nonce, :kv, 'pending', now())"),
+        " token_ciphertext, token_nonce, key_version) "
+        "VALUES (:id, :pid, :inv, :et, :rcpt, :ct, :nonce, :kv)"),
         {"id": str(event_id), "pid": str(partner_id), "inv": str(invitation_id),
          "et": EVENT_INVITATION_CREATED, "rcpt": recipient,
          "ct": ciphertext, "nonce": nonce, "kv": key_version})
