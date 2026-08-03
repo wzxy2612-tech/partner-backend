@@ -95,9 +95,20 @@ LEDGER_TABLES = {"alembic_version"}
 # be named for what it is, or a coverage test that only asks "is there a gated
 # policy" stays green while a table becomes globally readable.
 #
-# Empty today. app_dispatcher will need three entries (outbox_events,
-# invitations, partners) and each should be argued for on its own.
-PERMISSIVE_TRUE: dict[tuple[str, str], str] = {}
+# app_dispatcher (0018). Three tables, each argued for separately -- the point
+# of registering them one at a time is that a fourth would show up here as a
+# failure rather than as nothing.
+PERMISSIVE_TRUE: dict[tuple[str, str], str] = {
+    ("app_dispatcher", "outbox_events"):
+        "claims work across tenants; that IS the job",
+    ("app_dispatcher", "invitations"):
+        "reads status and expires_at to decide deliverability; column-scoped "
+        "so token_hash stays unreadable",
+    ("app_dispatcher", "partners"):
+        "partner_is_active() is SECURITY INVOKER and reads this table as the "
+        "caller -- without the policy it returns false for every partner and "
+        "the dispatcher silently delivers nothing",
+}
 
 
 # ---------------------------------------------------------------------------

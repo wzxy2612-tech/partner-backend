@@ -16,13 +16,34 @@ services:
       timeout: 5s
       retries: 10
 
-  api:
+  # Migrations run in their own container so the API does not execute DDL at
+  # boot. A crash-looping API and a failed migration are different problems and
+  # used to produce the same symptom.
+  migrate:
     build: .
     depends_on:
       db:
         condition: service_healthy
     environment:
       OWNER_DATABASE_URL: postgresql+psycopg://app_owner:owner_pw@db:5432/partner_backend
+    command: alembic upgrade head
+
+  api:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      # This container is also the test runner, which is why it still holds
+      # every role's credentials: asserting what app_dispatcher may NOT do
+      # requires connecting as app_dispatcher. A production API image would
+      # carry RUNTIME and PLATFORM and nothing else. This compose file is a
+      # local development topology and is not a deployment template -- it also
+      # publishes 5432 and uses fixed passwords.
+      OWNER_DATABASE_URL: postgresql+psycopg://app_owner:owner_pw@db:5432/partner_backend
+      DISPATCHER_DATABASE_URL: postgresql+psycopg://app_dispatcher:dispatcher_pw@db:5432/partner_backend
       RUNTIME_DATABASE_URL: postgresql+psycopg://app_runtime:runtime_pw@db:5432/partner_backend
       PLATFORM_DATABASE_URL: postgresql+psycopg://app_platform:platform_pw@db:5432/partner_backend
       # No default, deliberately. A working key committed here is the thing that
@@ -34,9 +55,26 @@ services:
       OUTBOX_CURRENT_KEY_VERSION: ${OUTBOX_CURRENT_KEY_VERSION:-}
     ports:
       - "8000:8000"
-    command: >
-      sh -c "alembic upgrade head &&
-             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  # One shot: drains what is due and exits. Not started by `docker compose up`
+  # -- `make dispatch`, or whatever scheduler the environment already has.
+  #
+  # Note what is NOT here: no owner, runtime or platform URL. This container can
+  # reach three tables through three policies and nothing else in the database,
+  # which is the entire reason app_dispatcher exists rather than reusing
+  # app_platform.
+  dispatcher:
+    build: .
+    profiles: ["tools"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DISPATCHER_DATABASE_URL: postgresql+psycopg://app_dispatcher:dispatcher_pw@db:5432/partner_backend
+      OUTBOX_KEYS: ${OUTBOX_KEYS:?OUTBOX_KEYS is required - see .env.example}
+      OUTBOX_CURRENT_KEY_VERSION: ${OUTBOX_CURRENT_KEY_VERSION:-}
+    command: python -m app.dispatcher
 
 volumes:
   pgdata:

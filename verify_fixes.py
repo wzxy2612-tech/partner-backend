@@ -491,6 +491,40 @@ CHECKS = [
       r'_constraint\(exc\) == "ck_outbox_pending_has_payload"',
       r"def test_every_real_transition_produces_a_legal_row"], []),
 
+    # ---- round 14: the dispatcher exists and is confined ----------------
+    # A role provisioned with BYPASSRLS would not fail 0018's policies -- it
+    # would make them decoration. The migration refuses rather than proceeding.
+    ("R14 #2 0018 refuses a dispatcher that bypasses row security",
+     "alembic/versions/0018_dispatcher_role.py",
+     [r"rolsuper or role\.rolbypassrls", r"scripts/provision_dispatcher_role\.sql"],
+     []),
+
+    # USING (true) decides which rows; the column grant decides which facts.
+    ("R14 #2 the dispatcher may record outcomes, not redirect or reassign",
+     "alembic/versions/0018_dispatcher_role.py",
+     [r"WRITABLE = \[", r"can_move_tenant", r"can_redirect",
+      r"can_read_token_hash"],
+     [r'"partner_id", "recipient"']),
+
+    ("R14 #2 there is a runnable dispatcher with its own credentials",
+     "app/dispatcher.py",
+     [r"DISPATCHER_DATABASE_URL", r"dispatch_pending", r"validate_outbox_config"],
+     [r"from app\.db import"]),
+
+    # Every refusal in that file is worthless without the matching reach.
+    ("R14 #2 the dispatcher tests pair each refusal with a capability",
+     "tests/test_dispatcher_role.py",
+     [r"def test_the_dispatcher_sees_events_from_every_tenant",
+      r"def test_the_dispatcher_can_deliver_end_to_end",
+      r"def test_the_dispatcher_does_not_bypass_row_security",
+      r"def test_the_dispatcher_cannot_redirect_an_event"], []),
+
+    ("R14 the per-table bypasses are registered with reasons",
+     "tests/test_rls_coverage.py",
+     [r'\("app_dispatcher", "outbox_events"\)',
+      r'\("app_dispatcher", "invitations"\)',
+      r'\("app_dispatcher", "partners"\)'], []),
+
     ("R9 login consumes the shared predicate instead of its own copy",
      "app/routers/auth.py",
      [r"public\.partner_is_active\(id\)", r"FOR SHARE"],
@@ -528,13 +562,17 @@ REQUIRED_FILES = [
     "alembic/versions/0017_outbox_terminal_invariants.py",
     "tests/test_outbox_invariants.py",
     "scripts/scan_outbox_invariants.sql",
+    "alembic/versions/0018_dispatcher_role.py",
+    "app/dispatcher.py",
+    "scripts/provision_dispatcher_role.sql",
+    "tests/test_dispatcher_role.py",
 ]
 
 # def test_ count per file, after this round's patches. test_bypass_truth_table
 # parametrizes into 5. Baseline was 96 functions / 100 collected; this round
 # adds two test files (counts filled in once written).
-EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6   # +6 outbox invariants
-EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6
+EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9   # +9 dispatcher role
+EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9
 
 
 def _strip_comments(src: str) -> str:

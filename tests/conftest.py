@@ -30,6 +30,10 @@ RUNTIME_URL = os.environ.get(
     "RUNTIME_DATABASE_URL", "postgresql+psycopg://app_runtime:runtime_pw@localhost:5432/partner_backend")
 PLATFORM_URL = os.environ.get(
     "PLATFORM_DATABASE_URL", "postgresql+psycopg://app_platform:platform_pw@localhost:5432/partner_backend")
+# The delivery role (0018). Present here only so its boundary can be asserted --
+# proving app_dispatcher may not redirect an event requires connecting as it.
+DISPATCHER_URL = os.environ.get(
+    "DISPATCHER_DATABASE_URL", "postgresql+psycopg://app_dispatcher:dispatcher_pw@localhost:5432/partner_backend")
 
 PARTNER_A = UUID("11111111-1111-1111-1111-111111111111")
 PARTNER_B = UUID("22222222-2222-2222-2222-222222222222")
@@ -61,6 +65,20 @@ def _migrate():
 @pytest.fixture(scope="session")
 def platform_engine():
     eng = create_engine(PLATFORM_URL)
+    yield eng
+    eng.dispose()
+
+
+@pytest.fixture(scope="session")
+def dispatcher_engine():
+    """The delivery role (0018): NOBYPASSRLS, three tables, nothing else.
+
+    Its cross-tenant reach comes from three `USING (true)` policies rather than
+    the role attribute -- which is a real difference and also a smaller one than
+    it sounds, so tests that use this fixture should be asserting a boundary,
+    not borrowing a convenient connection.
+    """
+    eng = create_engine(DISPATCHER_URL)
     yield eng
     eng.dispose()
 
