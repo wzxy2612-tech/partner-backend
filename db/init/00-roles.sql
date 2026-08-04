@@ -1,5 +1,5 @@
 -- Runs once on first container init, as the postgres superuser, against
--- POSTGRES_DB (partner_backend). Establishes the three-role privilege model.
+-- POSTGRES_DB (partner_backend). Establishes the four-role privilege model.
 --
 --   app_owner    -> owns schema objects, runs migrations (DDL). Never used at
 --                   request time.
@@ -36,15 +36,8 @@ ALTER DATABASE partner_backend OWNER TO app_owner;
 ALTER SCHEMA public OWNER TO app_owner;
 GRANT USAGE ON SCHEMA public TO app_runtime, app_platform, app_dispatcher;
 
--- Anything app_owner creates later (via migrations) is automatically usable by
--- the two runtime roles -> no per-table GRANTs needed in migrations.
---
--- app_dispatcher is DELIBERATELY ABSENT from these default privileges. This is
--- the mechanism that made outbox_events world-writable the day 0013 created it:
--- a new table is granted before anyone decides whether it should be. The newest
--- role does not inherit that. It starts with nothing and every table it can
--- reach was granted on purpose, in a migration, one at a time.
-ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA public
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_runtime, app_platform;
-ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA public
-  GRANT USAGE, SELECT ON SEQUENCES TO app_runtime, app_platform;
+-- Anything app_owner creates later (via migrations) is born UNGRANTED: this
+-- script deliberately does not create any default privileges. A table is born
+-- unreachable, and every role that must touch it is granted explicitly in the
+-- migration that creates it. (For historical clusters, migration 0020 serves
+-- as the backfill that explicitly revoked all legacy default privileges).

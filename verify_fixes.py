@@ -562,6 +562,15 @@ CHECKS = [
      "app/routers/auth.py",
      [r"public\.partner_is_active\(id\)", r"FOR SHARE"],
      [r'row\.status != "active"']),
+
+    # ---- round 16: 0020 default privileges cleanup ----------------------
+    ("R16 0020 explicit grants anchor on the script text",
+     "alembic/versions/0020_revoke_default_privileges.py",
+     [r"REVOKE ALL ON audit_default_privileges FROM", r"PRIOR_STATE"], []),
+
+    ("R16 db/init must not create default privileges",
+     "db/init/00-roles.sql",
+     [], [r"ALTER DEFAULT PRIVILEGES"]),
 ]
 
 REQUIRED_FILES = [
@@ -600,13 +609,16 @@ REQUIRED_FILES = [
     "scripts/provision_dispatcher_role.sql",
     "tests/test_dispatcher_role.py",
     "alembic/versions/0019_runtime_outbox_insert_only.py",
+    "alembic/versions/0020_revoke_default_privileges.py",
+    "tests/test_default_privileges.py",
+    "scripts/dump_acls.sql",
 ]
 
 # def test_ count per file, after this round's patches. test_bypass_truth_table
 # parametrizes into 5. Baseline was 96 functions / 100 collected; this round
 # adds two test files (counts filled in once written).
-EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9   # +9 dispatcher role
-EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9
+EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3   # +9 dispatcher role, +3 default privileges
+EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3
 
 
 def _strip_comments(src: str) -> str:
@@ -615,6 +627,7 @@ def _strip_comments(src: str) -> str:
     comment explaining why LIKE had been removed."""
     src = re.sub(r'"""(?:.|\n)*?"""', "", src)
     src = re.sub(r"^\s*#.*$", "", src, flags=re.M)
+    src = re.sub(r"^\s*--.*$", "", src, flags=re.M)
     return src
 
 

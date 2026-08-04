@@ -15,17 +15,19 @@ guard drew its inventory from the same catalog the thing it guards writes to.
 
 0013 created outbox_events and never enabled row security. That test passed.
 
-WHAT MAKES IT FAIL OPEN
+WHAT MAKES IT FAIL CLOSED
 
-db/init/00-roles.sql:35 --
+Before 0020, db/init/00-roles.sql contained an ALTER DEFAULT PRIVILEGES grant
+that made every new table automatically accessible to app_runtime and app_platform.
+Under those rules, forgetting to write a policy meant the table was fail-open
+(world-writable across tenants).
 
-    ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA public
-      GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_runtime, app_platform;
-
-Creating a table and protecting a table are two separate acts, and only the
-first is required to happen. "Forgot the policy" therefore means "world-writable
-across tenants", not "unusable" -- the inverse of the fail-closed property the
-rest of the schema is built on.
+After 0020, that blanket grant is gone (and verify_fixes.py R16 now guards
+db/init against its return). A table without a policy is simply unreachable
+(fail-closed) because it lacks the necessary GRANT. Therefore, this coverage
+script no longer catches "someone forgot to do anything". Instead, it catches
+the specific, narrower failure where "someone explicitly granted access to a
+confined role, but forgot the policy".
 
 THE TWO ENUMERATION RULES
 
@@ -424,8 +426,9 @@ def test_a_confined_role_cannot_write_an_unscoped_table(scan):
     only one of them is about columns.
 
     Bypassing roles are deliberately out of scope here: app_platform writing an
-    unscoped table is the design (subscriptions is platform-only by 0008), and
-    what confines it is the grant, checked separately.
+    unscoped table is the design (subscriptions is platform-only because 0020
+    omitted its grant to app_runtime), and what confines it is the grant,
+    checked separately.
     """
     problems = []
     for role in scan.confined_roles():
@@ -438,7 +441,7 @@ def test_a_confined_role_cannot_write_an_unscoped_table(scan):
         "confined roles holding INSERT/UPDATE/DELETE on tables with no "
         "partner_id:\n  " + "\n  ".join(problems)
         + "\nEither the table belongs to the platform path only (REVOKE ALL, as "
-          "0008 does for subscriptions) or it needs a tenant column.")
+          "0020 does for subscriptions) or it needs a tenant column.")
 
 
 # ---------------------------------------------------------------------------
