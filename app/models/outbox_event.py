@@ -37,9 +37,32 @@ class OutboxEvent(Base):
         CheckConstraint("status IN ('pending', 'sent', 'failed')",
                         name="ck_outbox_events_status_enum"),
         CheckConstraint("attempts >= 0", name="ck_outbox_events_attempts_nonneg"),
+        # 0017 replaced one constraint with three. The single old check only
+        # spoke about `sent`, so a dead-lettered row could keep a decryptable
+        # ciphertext and the application code got to decide whether to clear it.
+        # Three named constraints make "which invariant broke" a fact the
+        # database reports through diag.constraint_name rather than something a
+        # caller reconstructs from message text.
+        #
+        # Copied VERBATIM from 0017's CHECKS. alembic compares check
+        # constraints by NAME, not by expression -- so three constraints with
+        # the right names and wrong predicates would satisfy `alembic check`
+        # while the model described a database that does not exist. What the
+        # constraints actually DO is pinned by tests/test_outbox_invariants.py
+        # against a real database; this declaration is the model's account of
+        # them, and the two have to be kept in step by hand.
         CheckConstraint(
-            "(status = 'sent') = (token_ciphertext IS NULL AND sent_at IS NOT NULL)",
-            name="ck_outbox_events_sent_has_no_secret"),
+            "status <> 'pending' OR (token_ciphertext IS NOT NULL "
+            "AND token_nonce IS NOT NULL AND sent_at IS NULL)",
+            name="ck_outbox_pending_has_payload"),
+        CheckConstraint(
+            "status <> 'sent' OR (token_ciphertext IS NULL "
+            "AND token_nonce IS NULL AND sent_at IS NOT NULL)",
+            name="ck_outbox_sent_is_clean"),
+        CheckConstraint(
+            "status <> 'failed' OR (token_ciphertext IS NULL "
+            "AND token_nonce IS NULL AND sent_at IS NULL)",
+            name="ck_outbox_failed_is_clean"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
