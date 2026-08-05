@@ -53,6 +53,8 @@ services:
       OUTBOX_KEYS: ${OUTBOX_KEYS:?OUTBOX_KEYS is required - see .env.example}
       # Only needed once a second key exists; with one key it is inferred.
       OUTBOX_CURRENT_KEY_VERSION: ${OUTBOX_CURRENT_KEY_VERSION:-}
+      # Passed through UNSET by default; when unset, CORS is disabled in app/main.py.
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-}
     ports:
       - "8000:8000"
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000

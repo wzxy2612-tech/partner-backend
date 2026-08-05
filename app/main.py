@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
+import os
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers import (auth, partners, workspaces, onboarding, invitations,
                          activity, branding, workflows, usage, maintenance)
@@ -22,6 +24,37 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Partner Multi-Tenancy Backend", version="0.5.0",
               lifespan=lifespan)
+
+# Local frontend development only, and the list is a literal.
+#
+# `allow_origins=["*"]` cannot be combined with credentials by spec, so the
+# usual next step is a regex or an echo of the Origin header -- at which point
+# any site can call this API with a victim's Authorization header attached. A
+# hardcoded list has no such next step.
+#
+# Read from an env var with NO default rather than being unconditional: a
+# deployment that has not named its origins gets no CORS at all, which is the
+# safe direction. Same shape as OUTBOX_SENDER: absent means refuse, not guess.
+#
+# This sits below the lifespan gate and does not touch it. Adding middleware is
+# inside the freeze boundary; changing what lifespan calls, or when, is not.
+CORS_ORIGINS_ENV = "CORS_ALLOW_ORIGINS"
+_origins = [o.strip() for o in os.environ.get(CORS_ORIGINS_ENV, "").split(",")
+            if o.strip()]
+if _origins:
+    if "*" in _origins:
+        raise RuntimeError(
+            f"{CORS_ORIGINS_ENV} must name origins literally. A wildcard here "
+            f"would let any site issue credentialed requests against this API.")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_origins,
+        allow_credentials=True,
+        # Authorization on a cross-origin request always triggers a preflight,
+        # and FastAPI's routes do not answer OPTIONS -- the middleware does.
+        allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
 
 app.include_router(auth.router)
 app.include_router(partners.router)

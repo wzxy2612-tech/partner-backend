@@ -665,6 +665,31 @@ CHECKS = [
       r"def test_a_new_function_is_born_uncallable",
       r"has_function_privilege\('app_dispatcher'"], []),
 
+    # A decryption oracle cannot be made unreachable the way ConsoleEmailSender
+    # was -- decrypting is its purpose. So it takes the next shape: it must be
+    # named, with no default, and the gate sits above every heavy import so a
+    # refused run never builds a keyring.
+    ("R18 the local token tool is gated and refuses before it imports anything",
+     "tools/dev/dev_decode_invite_token.py",
+     [r'GATE_VALUE = "i-understand"', r'ROLE = "app_platform"',
+      r"if os\.environ\.get\(GATE_ENV\) != GATE_VALUE"], []),
+
+    # Truthiness is not consent: ALLOW_TOKEN_DECRYPT=1 is what ends up in a
+    # compose file by habit.
+    ("R18 the gate ordering is read by something, not just written once",
+     "tests/test_dev_token_tool.py",
+     [r"def test_the_gate_ordering_and_the_documented_invocation",
+      r"def test_it_lives_outside_scripts",
+      r'"I-UNDERSTAND"'], []),
+
+    # allow_origins=["*"] cannot carry credentials by spec, so the usual next
+    # step is echoing the Origin header -- and then any site can call this API
+    # with a victim's Authorization attached.
+    ("R18 CORS names its origins literally and defaults to none",
+     "app/main.py",
+     [r"CORS_ORIGINS_ENV", r"validate_outbox_config\(\)"],
+     [r'allow_origins=\["\*"\]', r"allow_origin_regex"]),
+
     ("R17 #2 the adversary echoes its arguments",
      "tests/test_outbox.py",
      [r"class _Echo", r"token \{token\} not accepted",
@@ -673,6 +698,9 @@ CHECKS = [
 ]
 
 REQUIRED_FILES = [
+    "tools/dev/dev_decode_invite_token.py",
+    "tests/test_dev_token_tool.py",
+    "app/main.py",
     "alembic/versions/0021_function_execute_grants.py",
     "tests/test_function_grants.py",
     "tests/test_dispatcher_sender.py",
@@ -721,8 +749,8 @@ REQUIRED_FILES = [
 # def test_ count per file, after this round's patches. test_bypass_truth_table
 # parametrizes into 5. Baseline was 96 functions / 100 collected; this round
 # adds two test files (counts filled in once written).
-EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3 + 1 + 2 + 4 + 1 + 4   # +9 dispatcher role, +3 default privileges, +1 reverse-order domain race, +2 duplicate key version
-EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3 + 1 + 2 + 4 + 1 + 4
+EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3 + 1 + 2 + 4 + 1 + 4 + 4   # +9 dispatcher role, +3 default privileges, +1 reverse-order domain race, +2 duplicate key version
+EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3 + 1 + 2 + 4 + 1 + 4 + 9
 
 
 def _strip_comments(src: str) -> str:
@@ -773,7 +801,7 @@ def main() -> int:
                 for f in tests_dir.glob("test_*.py"))
         print(f"\ntest functions: {n} (expected {EXPECTED_DEF_TESTS})")
         print(f"pytest should collect {EXPECTED_COLLECTED} "
-              f"(test_bypass_truth_table parametrizes 1 -> 5)")
+              f"(test_bypass_truth_table parametrizes 1 -> 5; test_it_refuses_without_the_exact_phrase 1 -> 6)")
         if n != EXPECTED_DEF_TESTS:
             failures.append(f"test function count {n} != {EXPECTED_DEF_TESTS}")
 
