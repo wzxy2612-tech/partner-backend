@@ -13,3 +13,4 @@ doc/
 .DS_Store
 APPLY.md
 test_results.txt
+verify_result.txt
