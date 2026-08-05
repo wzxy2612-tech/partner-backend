@@ -9,6 +9,8 @@ Built as a portfolio project. All five feature phases are complete, plus
 ongoing audit-driven hardening rounds that close cross-tenant holes
 the earlier audits surfaced.
 
+> **Start here**: Read [The isolation design](#the-isolation-design-structural-not-behavioural) first to understand the security model in 20 minutes; the remaining sections provide detailed feature & audit evidence.
+
 ## The isolation design (structural, not behavioural)
 
 A common approach scopes tenants in application code (`WHERE partner_id = ?` on
@@ -119,7 +121,7 @@ unit-tested; `enforce()` wires them to the DB and raises 403.
 **Invitations** close the loop with auth: an onboarded user starts inactive with
 no password; redeeming the one-time token sets their password and activates them,
 after which the Phase 2 login flow works. Delivery is behind a pluggable
-`EmailSender` (console by default; an in-memory outbox in tests).
+`EmailSender` (configured via `OUTBOX_SENDER`; tests use `OutboxEmailSender` in memory).
 
 **Email uniqueness.** `users.email` is globally unique (baseline schema UNIQUE
 constraint). When onboarding collides, the SAVEPOINT rolls back and the
@@ -136,15 +138,15 @@ cross-tenant hole that the earlier phases left open.
 | **0008** value constraints + grants | `token_usage` accepted negative counts and impossible periods; `app_runtime` had blanket DML on every table including direct-customer data. |
 | **0009** platform tenant row | The nil UUID (platform/direct sentinel) had no row to reference — `users.partner_id` and `sessions.partner_id` were the only partner columns without an FK, allowing phantom partner IDs. |
 | **0010** platform role integrity | A forged membership could grant `platform_super_admin` inside a partner's own RLS scope. Role insertion is now gated by the platform path. |
-| **0011** RLS active-state gate | TOCTOU: identity resolved in one transaction, business operation in the next — a suspend could slip between. The `partners` policy now gates on `partner_is_active()`, which reads the row under BYPASSRLS so the check is never RLS-scoped. |
+| **0011** RLS active-state gate | TOCTOU: identity resolved in one transaction, business operation in the next — a suspend could slip between. The `partners` policy now gates on `partner_is_active()`, which runs as `SECURITY INVOKER` under the caller's RLS scope (requiring explicit RLS policies for roles that evaluate it). |
 | **0012** workspace parent same-company | A workspace could be reparented under a sibling workspace in the same partner but different company, causing scope inheritance to return the wrong company. |
 | **0013** transactional outbox | Invitation emails were sent inside the batch SAVEPOINT — row 2 failure orphaned row 1's email. Outbox decouples delivery from the transaction. |
 | **0014** outbox RLS + bookkeeping | The outbox table shipped with no tenant boundary; any tenant could read, rewrite, or delete another tenant's queued mail. RLS ENABLE + FORCE applied, plus a migration bookkeeping table. |
 | **0015** billing gate function | `billing_contact_email` was the one column outside the write gate (REVOKE + GRANT workaround). A suspended partner's in-flight request could still update it. A DB-side gate function now makes the write decision inside PostgreSQL, closing the TOCTOU window entirely. |
 | **0016** alembic_version grant cleanup | `ALTER DEFAULT PRIVILEGES` (db/init/00-roles.sql) left `alembic_version` granted to `app_platform` (BYPASSRLS), so the migration gate's evidence could be rewritten by the code it constrains. Revoked. |
-| **0017** outbox terminal invariants | The `failed` state allowed a dead-lettered event to retain a recoverable ciphertext+nonce, and the application code chose whether to clear it. Now the state machine is enforced by CHECK constraints: `sent` ↔ ciphertext null, `failed` ↔ ciphertext null. |
+| **0017** outbox terminal invariants | The `failed` state allowed a dead-lettered event to retain a recoverable ciphertext+nonce, and the application code chose whether to clear it. Now the state machine is enforced by three CHECK constraints: `pending` ↔ ciphertext+nonce present, `sent` ↔ ciphertext null, `failed` ↔ ciphertext null. |
 | **0018** app_dispatcher role | A fourth role for outbox delivery. Given BYPASSRLS it would have the blast radius of `app_platform`; instead it gets three narrow per-table `USING (true)` policies, so its reach is opt-in and auditable per table. |
-| **0019** runtime outbox SELECT-only | `app_runtime` previously had DML on `outbox_events` (via default privileges), enabling the reverse redirect: insert a row for another tenant's event and have the dispatcher deliver it. Now `app_runtime` can only SELECT. |
+| **0019** runtime outbox INSERT-only | `app_runtime` previously had blanket DML on `outbox_events` (via default privileges). Now `app_runtime` can only INSERT (column-scoped to 8 columns with default pending/now values), making the queue append-only for runtime. |
 | **0020** revoke default privileges | `db/init/00-roles.sql` no longer grants default privileges on future objects; `0020` revokes any that survived on already-initialized clusters. New tables are born unreachable; every grant must be explicit in the migration that creates the table. Includes `audit_default_privileges` single-predicate view and `PRIOR_STATE` downgrade reconstruction. |
 | **0021** function EXECUTE grants | PostgreSQL grants `EXECUTE` on new functions to PUBLIC via a hardwired default (`proacl IS NULL`). This is root cause A in its second form: functions are reachable before anyone decides they should be. Revoked; explicit grants added. Includes the `DROP + CREATE` trap warning (CREATE OR REPLACE preserves ACL). |
 
@@ -165,7 +167,7 @@ cross-tenant hole that the earlier phases left open.
 
 ## Tests
 
-≈216 tests across 36 files (`make test`). The suite covers:
+Test counts are tracked by `verify_fixes.py` as the single source of truth (currently 220 collected tests across 37 test files via `make test`). The suite covers:
 
 - **Tenant isolation** — visibility, write blocking, cross-tenant FK rejection
 - **Cross-table reference ownership** — FK triggers cannot be used to point at
@@ -195,7 +197,7 @@ cross-tenant hole that the earlier phases left open.
 
 ```bash
 make up      # postgres + auto-migrate + api on :8000
-make test    # tenant-isolation suite (≈168 tests)
+make test    # tenant-isolation suite (see verify_fixes.py for exact count)
 make migrate # run alembic migrations
 make logs    # tail the API container
 ```
@@ -203,7 +205,7 @@ make logs    # tail the API container
 The dispatcher is a one-shot worker — invoke it directly:
 
 ```bash
-docker compose run --rm dispatcher
+docker compose run --rm --build dispatcher
 ```
 
 `make dispatch` is a dev convenience; the exit-code contract holds for
@@ -240,7 +242,7 @@ docker compose exec api pytest
   constraints, platform tenant materialization, role integrity, RLS active-state
   gate, workspace parent same-company, transactional outbox, billing gate function,
   alembic_version grant cleanup (0016), outbox terminal invariants (0017),
-  app_dispatcher role (0018), runtime outbox SELECT-only (0019), revoke default
+  app_dispatcher role (0018), runtime outbox INSERT-only (0019), revoke default
   privileges (0020), function EXECUTE grants (0021).
 
 **Next:** production deployment (containerized, multi-instance), observability
@@ -251,6 +253,8 @@ delivery (requires registering a delivering sender in
 ## Known limitations
 
 - **No delivering sender configured.** `DELIVERING_SENDERS` is empty in this build; `OUTBOX_SENDER` must name a registered provider, and `ConsoleEmailSender` is deliberately not registerable (it would drain the queue into stdout and destroy every token). Registering an SMTP or provider sender is the one change that makes the dispatcher runnable.
+- **Implicit delivery assertion (`provider_message_id` is an unpopulated slot).** The outbox considers an event `sent` as long as `send_invitation()` returns without raising, rather than recording a provider delivery receipt ID. `outbox_events.provider_message_id` exists in the schema (0013) but is not yet written at dispatch time.
+- **No CI pipeline.** Automated tests and `verify_fixes.py` are executed locally or inside containers (`make test`), but no GitHub Actions / CI workflow is configured yet.
 - **No rate limiting.** API requests are unbounded; add a middleware or gateway layer before production exposure.
 - **Single-instance design.** The current `docker compose` setup runs one API
   replica; horizontal scaling requires a shared session store and connection
