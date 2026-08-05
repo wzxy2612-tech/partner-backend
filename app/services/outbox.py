@@ -229,8 +229,7 @@ def dispatch_pending(db: OrmSession, sender: EmailSender, *,
         try:
             sender.send_invitation(row.recipient, token)
         except Exception as exc:
-            # Never interpolate the token or the payload into the stored error.
-            reason = f"{type(exc).__name__}: {str(exc)[:200]}"
+            reason = _delivery_failure_reason(exc)
             if row.attempts + 1 >= MAX_ATTEMPTS:
                 _dead_letter(db, row.id, reason)
                 result.dead_lettered.append(row.id)
@@ -250,6 +249,35 @@ def dispatch_pending(db: OrmSession, sender: EmailSender, *,
         result.sent.append(row.id)
 
     return result
+
+
+LAST_ERROR_MAX = 200
+
+
+def _delivery_failure_reason(exc: BaseException) -> str:
+    """What a delivery failure is allowed to leave behind.
+
+    The type, never the message. This used to be
+    `f"{type(exc).__name__}: {str(exc)[:200]}"`, with a comment promising not to
+    interpolate the token -- and that promise was about what THIS function
+    passes in, not about what the string already contains. str(exc) comes from
+    the provider's client library, which routinely echoes the request back in
+    an error: the address, the URL, the template variables, the token. Reported
+    live: a sender raising with the plaintext token in its message put the token
+    in last_error.
+
+    What that costs is not a log line. The token exists in plaintext for the
+    length of one dispatch and is destroyed by the same statement that records
+    delivery; last_error is a durable column that goes to backups, replicas, the
+    platform role, and any admin page that renders it. Moving the token from the
+    first into the second undoes the reason the outbox encrypts at all.
+
+    No CHECK can express "this text contains no secret", so there is no auditor
+    downstream that can catch a bad value here. The constraint has to be that
+    untrusted text never enters -- which makes this function the only place the
+    question is answered, and the only place to look when it is answered wrong.
+    """
+    return f"{type(exc).__name__}: delivery failed"[:LAST_ERROR_MAX]
 
 
 def _schedule_retry(db: OrmSession, event_id: UUID, attempts: int,

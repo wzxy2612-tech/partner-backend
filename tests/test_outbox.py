@@ -21,6 +21,14 @@ CSV = ("email,name,role,company\n"
        "ob2@x.test,Two,author,Company A\n")
 
 
+class _Echo:
+    """Raises with exactly what it was handed. Providers echo the request back
+    in error bodies -- the address, the URL, the token -- so this is the shape
+    of adversary the retry path actually meets."""
+    def send_invitation(self, email, token):
+        raise ValueError(f"provider rejected {email}: token {token} not accepted")
+
+
 class _Boom:
     """A sender that always fails, for the retry and dead-letter paths."""
     def __init__(self, exc=RuntimeError("smtp down")):
@@ -104,21 +112,58 @@ def test_failure_keeps_the_payload_and_backs_off(ids, platform_orm):
     assert all(r.attempts == 1 for r in rows)
     assert all(r.token_ciphertext is not None for r in rows)
     assert all(r.deferred for r in rows), "retry must be scheduled, not immediate"
-    assert all("smtp down" in r.last_error for r in rows)
+    # The TYPE, not the message. This line used to assert "smtp down" was
+    # stored, which pinned the leak: it required the provider's own words to be
+    # persisted, and a provider's words are whatever the provider decides to
+    # echo back. The type is drawn from code, so it is ours to record.
+    assert all(r.last_error == "RuntimeError: delivery failed" for r in rows)
 
 
 def test_stored_error_never_contains_the_token(ids, platform_orm):
-    """A failure message is written to the row. It must describe the failure,
-    not the payload."""
+    """This test existed, passed, and did not catch the defect it is named for.
+
+    Its adversary was _Boom, which raises RuntimeError("smtp down") -- a message
+    with no token in it. Asserting the token was absent proved a property of the
+    fixture, not of the code: nothing had put the token there because nothing
+    had one to put. The sender is handed the plaintext token as an argument, so
+    an adversary that echoes its arguments is the faithful one, and providers do
+    exactly that in error bodies.
+    """
     with platform_orm() as db:
         onboarding.onboard(db, ids.partner_a, CSV)
-        tokens = {t for _e, t in _peek_tokens(db)}
-        outbox.dispatch_pending(db, _Boom())
-        errors = db.execute(text("SELECT last_error FROM outbox_events")).scalars().all()
+        peeked = _peek_tokens(db)
+        tokens = {t for _e, t in peeked}
+        outbox.dispatch_pending(db, _Echo())
+        rows = db.execute(text(
+            "SELECT recipient, last_error FROM outbox_events")).all()
 
-    for err in errors:
+    assert tokens, "no tokens to leak -- this test would pass vacuously"
+    for row in rows:
         for tok in tokens:
-            assert tok not in err
+            assert tok not in row.last_error
+        # The address came from the same untrusted string. It is already in the
+        # recipient column, so this is not new exposure -- but it is the same
+        # text, and if it survived then so could anything else in it.
+        assert row.recipient not in row.last_error
+
+
+def test_the_failure_type_is_still_recorded(ids, platform_orm):
+    """The opposite over-correction: storing nothing at all.
+
+    An empty last_error makes a dead-lettered batch uninvestigable, and the
+    first person who has to investigate one will put str(exc) back. Recording
+    the type is what makes that unnecessary.
+    """
+    with platform_orm() as db:
+        onboarding.onboard(db, ids.partner_a, CSV)
+        outbox.dispatch_pending(db, _Echo())
+        errors = db.execute(text(
+            "SELECT last_error FROM outbox_events")).scalars().all()
+
+    assert errors
+    for err in errors:
+        assert err.startswith("ValueError:"), err
+        assert len(err) <= outbox.LAST_ERROR_MAX
 
 
 def test_reaching_the_attempt_limit_dead_letters(ids, platform_orm):

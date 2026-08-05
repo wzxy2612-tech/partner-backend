@@ -632,6 +632,24 @@ CHECKS = [
      [r"def test_console_cannot_be_named",
       r"def test_a_registered_sender_is_returned",
       r"def test_the_dispatcher_exits_nonzero_before_touching_the_database"], []),
+
+    # str(exc) is the provider's text, and providers echo the request back --
+    # address, URL, token. No CHECK can express "contains no secret", so the
+    # only place to enforce it is the write. MUST_NOT str\(exc\) is the whole
+    # check: the moment it reappears the constraint is gone.
+    ("R17 #2 the provider's words never reach last_error",
+     "app/services/outbox.py",
+     [r"def _delivery_failure_reason", r"reason = _delivery_failure_reason\(exc\)"],
+     [r"str\(exc\)"]),
+
+    # The old regression test passed while the defect was live: its sender
+    # raised a message with no token in it, so absence proved nothing. The
+    # adversary has to echo what it was handed.
+    ("R17 #2 the adversary echoes its arguments",
+     "tests/test_outbox.py",
+     [r"class _Echo", r"token \{token\} not accepted",
+      r"def test_the_failure_type_is_still_recorded"],
+     [r'"smtp down" in r\.last_error']),
 ]
 
 REQUIRED_FILES = [
@@ -678,8 +696,8 @@ REQUIRED_FILES = [
 # def test_ count per file, after this round's patches. test_bypass_truth_table
 # parametrizes into 5. Baseline was 96 functions / 100 collected; this round
 # adds two test files (counts filled in once written).
-EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3 + 1 + 2 + 4   # +9 dispatcher role, +3 default privileges, +1 reverse-order domain race, +2 duplicate key version
-EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3 + 1 + 2 + 4
+EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3 + 1 + 2 + 4 + 1   # +9 dispatcher role, +3 default privileges, +1 reverse-order domain race, +2 duplicate key version
+EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3 + 1 + 2 + 4 + 1
 
 
 def _strip_comments(src: str) -> str:

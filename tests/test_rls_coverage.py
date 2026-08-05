@@ -355,9 +355,11 @@ def test_every_table_a_confined_role_reaches_has_rls_enabled(scan):
     assert problems == [], (
         "roles that row security applies to, reaching tables with none:\n  "
         + "\n  ".join(problems)
-        + "\nDefault privileges (db/init/00-roles.sql) grant DML on every new "
-          "table automatically, so a table without ENABLE ROW LEVEL SECURITY is "
-          "not unreachable -- it is cross-tenant readable and writable.")
+        + "\nA confined role can only reach a table via an explicit "
+          "grant, but a table with that grant and no ENABLE ROW LEVEL "
+          "SECURITY is cross-tenant readable and writable. There is no "
+          "default privilege safety net — every grant is deliberate, "
+          "and every grant without RLS is a real exposure.")
 
 
 def test_every_table_a_confined_role_reaches_forces_rls(scan):
