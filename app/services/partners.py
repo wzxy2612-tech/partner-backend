@@ -42,7 +42,7 @@ REVOKED_BY_LIFECYCLE = "invitation revoked by a partner lifecycle change"
 
 
 def _revoke_pending_invitations(db: OrmSession, partner_id: UUID,
-                                user_ids: list[UUID] | None = None) -> tuple[int, int]:
+                                domain: str | None = None) -> tuple[int, int]:
     """Revoke pending invitations and terminate the mail queued for them.
 
     Both halves, in the caller's transaction. Revoking the invitation alone
@@ -55,19 +55,27 @@ def _revoke_pending_invitations(db: OrmSession, partner_id: UUID,
     a dead token that is still decryptable is a liability with no remaining
     purpose.
 
-    user_ids=None means every pending invitation in the partner (suspension).
-    A list narrows it to those users (domain deactivation); an EMPTY list means
-    no users matched and nothing should be revoked -- which is not the same as
-    None, and conflating them would let a domain deactivation that matched
-    nobody wipe the whole partner's invitations.
+    domain=None means every pending invitation in the partner (suspension). A
+    domain narrows it to the users on that domain (domain deactivation).
+
+    The narrowing is a SUBQUERY, not a list of user ids computed by the caller.
+    Same rows either way; the difference is WHEN the caller may read `users`.
+    With a precomputed list the caller had to scan users BEFORE this statement,
+    and this statement is the one that blocks on a concurrent redemption -- so
+    the scan happened on the pre-block snapshot and could not see a user the
+    redemption activated while we waited. Keeping the user lookup inside the
+    blocking statement leaves the caller free to scan afterwards.
+
+    An empty match revokes nothing, which falls out of the subquery instead of
+    needing the caller to distinguish an empty list from None.
     """
     params: dict = {"pid": str(partner_id)}
     narrowing = ""
-    if user_ids is not None:
-        if not user_ids:
-            return 0, 0
-        narrowing = " AND user_id = ANY(CAST(:uids AS uuid[]))"
-        params["uids"] = [str(u) for u in user_ids]
+    if domain is not None:
+        narrowing = (" AND user_id IN (SELECT id FROM users "
+                     " WHERE partner_id = :pid "
+                     "   AND split_part(lower(email), '@', 2) = :domain)")
+        params["domain"] = domain
 
     revoked = db.execute(text(
         "UPDATE invitations SET status = 'revoked' "
@@ -165,6 +173,23 @@ def deactivate_domain(db: OrmSession, partner_id: UUID, domain: str) -> int:
     # accept_invitation deliberately takes no lock on partners -- SELECT FOR
     # SHARE requires UPDATE privilege there, which the runtime role no longer
     # has since 0015.
+    #
+    # That predicate is symmetric. The CONSEQUENCE of losing is not, and the
+    # earlier version of this function read the symmetry as safety. A redemption
+    # that steps aside refuses to redeem, which is the safe outcome. A domain
+    # deactivation that steps aside abandons the deactivation, which is not --
+    # it returned success having done nothing, while the user it was supposed to
+    # disable finished redeeming and stayed active. Reported live: the reverse
+    # order (redemption claims first, deactivation arrives second) left
+    # `('accepted', is_active=True)` and an affected count of 0.
+    #
+    # The two racers are not interchangeable, so the ordering below is not
+    # either. Suspension does not have this problem because it writes a durable
+    # fact -- partners.status -- that accept_invitation reads as a conjunct via
+    # partner_is_active(). A deactivated domain is not a fact anywhere: there is
+    # no domain entity, no column, no row. It is a scan-and-assign over `users`,
+    # so a redemption arriving afterwards has nothing to consult. Closing THAT
+    # needs an entity and is out of scope here; what follows closes the race.
     _lock_partner(db, partner_id)
 
     # Exact comparison on the parsed domain, not a LIKE pattern. The domain was
@@ -173,10 +198,23 @@ def deactivate_domain(db: OrmSession, partner_id: UUID, domain: str) -> int:
     # wildcards would work and would leave the next author responsible for
     # remembering to escape; splitting the address removes pattern semantics
     # from the query altogether, so there is nothing left to forget.
+    normalized = domain.lower().lstrip("@")
+
+    # Revoke FIRST. This statement is the serialisation point: a redemption
+    # holding the invitation row makes it wait, and it re-reads `status` on that
+    # row when it unblocks. Everything after this line therefore reads a
+    # database in which the concurrent redemption has already committed or has
+    # already been refused -- there is no third state left.
+    _revoke_pending_invitations(db, partner_id, domain=normalized)
+
+    # Scan SECOND, on the far side of that wait. This is the whole fix: the
+    # previous order read `is_active` before blocking, saw the pre-redemption
+    # false, skipped the user, and then discovered the invitation was no longer
+    # pending -- so neither half acted on the user who had just been activated.
     rows = db.execute(
         text("SELECT id, is_active FROM users "
              "WHERE partner_id = :pid AND split_part(lower(email), '@', 2) = :domain"),
-        {"pid": str(partner_id), "domain": domain.lower().lstrip("@")},
+        {"pid": str(partner_id), "domain": normalized},
     ).all()
 
     deactivated = 0
@@ -187,7 +225,6 @@ def deactivate_domain(db: OrmSession, partner_id: UUID, domain: str) -> int:
             deactivated += 1
         revoke_user_sessions(db, row.id)
 
-    _revoke_pending_invitations(db, partner_id, user_ids=[r.id for r in rows])
     return deactivated
 
 

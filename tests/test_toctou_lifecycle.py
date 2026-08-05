@@ -513,3 +513,93 @@ def test_domain_deactivation_and_redemption_cannot_both_win(pending_invite, plat
             {"v": str(pending_invite.event_id)}).one()
         assert ev.status == "failed" and ev.token_ciphertext is None
         c.rollback()
+
+
+def _transition_while_redeeming(engine, transition, token):
+    """The mirror of _redeem_while: hold a REDEMPTION open, then start the
+    lifecycle transition and make it block on the invitation.
+
+    _redeem_while cannot express this. It opens the transition first, so the
+    redemption is always the one that waits -- and the redemption waiting is the
+    safe direction, because a redemption that steps aside refuses. The direction
+    that had never been exercised is the transition waiting, where stepping
+    aside means abandoning the transition and reporting success.
+
+    Returns (redeemed, transition_result).
+    """
+    Maker = sessionmaker(bind=engine, expire_on_commit=False)
+    outcome = {}
+
+    def run_transition():
+        db = Maker()
+        try:
+            outcome["result"] = transition(db)
+            db.commit()
+        except BaseException as exc:  # reported below, never swallowed
+            outcome["error"] = exc
+        finally:
+            db.close()
+
+    blocker = Maker()
+    worker = threading.Thread(target=run_transition, daemon=True)
+    try:
+        # Claims the invitation and sets the user active, both uncommitted, so
+        # the transition below reads is_active=false and waits on the row.
+        redeemed = accept_invitation(blocker, token, RACE_PASSWORD)
+        assert redeemed is True, (
+            "the redemption did not claim the invitation, so nothing holds the "
+            "row lock and the transition will never block -- this proves nothing")
+        worker.start()
+        assert _wait_until_blocked(engine), (
+            "the transition never waited on a lock, so the two transactions did "
+            "not overlap and this proves nothing about the race")
+        blocker.commit()
+    finally:
+        try:
+            blocker.rollback()       # no-op after a successful commit
+        finally:
+            blocker.close()
+        worker.join(timeout=15)
+
+    assert not worker.is_alive(), "the transition never finished"
+    assert "error" not in outcome, f"transition raised: {outcome.get('error')!r}"
+    return redeemed, outcome["result"]
+
+
+def test_domain_deactivation_still_acts_on_a_user_who_redeemed_first(
+        pending_invite, platform_engine):
+    """The reverse order, which the forward test structurally cannot reach.
+
+    A redemption that claimed before the deactivation arrived is legitimate --
+    the invitation was pending, unexpired, the partner active. So unlike the
+    forward case nothing here refuses. What must NOT happen is the deactivation
+    returning success having skipped the user: it read is_active before it
+    blocked, saw the pre-redemption false, and then found the invitation no
+    longer pending and did nothing to either.
+
+    Reported live as ('accepted', is_active=True) with an affected count of 0.
+    The revocation now runs BEFORE the user scan, so the scan is on the far side
+    of the wait and sees the user the redemption just activated.
+    """
+    redeemed, deactivated = _transition_while_redeeming(
+        platform_engine,
+        lambda db: deactivate_domain(db, pending_invite.partner_id, RACE_DOMAIN),
+        pending_invite.token)
+
+    assert redeemed is True
+    assert deactivated == 1, (
+        "domain deactivation reported it disabled no users while the invitee it "
+        "was called for ended up active. The count is the operator's only signal "
+        "and it has to be the truth.")
+
+    with platform_engine.connect() as c:
+        assert c.execute(text("SELECT is_active FROM users WHERE id = :u"),
+                         {"u": str(pending_invite.user_id)}).scalar_one() is False
+        # The redemption did claim it; that is not the failure and is pinned so
+        # a future change cannot "fix" this test by refusing the redemption.
+        assert c.execute(text("SELECT status FROM invitations WHERE id = :i"),
+                         {"i": str(pending_invite.invitation_id)}).scalar_one() == "accepted"
+        assert c.execute(text(
+            "SELECT count(*) FROM sessions WHERE user_id = :u AND revoked_at IS NULL"),
+            {"u": str(pending_invite.user_id)}).scalar_one() == 0
+        c.rollback()

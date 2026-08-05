@@ -397,16 +397,22 @@ CHECKS = [
     # invited user, so that clause skipped the accounts still at risk.
     ("R9 #9 domain deactivation scans every user on the domain",
      "app/services/partners.py",
-     [r"cannot be domain-deactivated", r"_revoke_pending_invitations\(db, partner_id, user_ids="],
+     [r"cannot be domain-deactivated", r"_revoke_pending_invitations\(db, partner_id, domain="],
      [r"AND is_active = true"]),
 
     ("R9 #9 revocation clears the queued secret, not just the invitation",
      "app/services/partners.py",
      [r"token_ciphertext = NULL, token_nonce = NULL",
-      r"if user_ids is not None", r"if not user_ids"], []),
+      r"if domain is not None"], []),
 
-    # An empty user_ids list means "matched nobody" and must not be read as
-    # "no narrowing", which would revoke the whole partner's invitations.
+    # This pair used to also pin `if not user_ids: return 0, 0` -- an empty
+    # match had to be distinguished from "no narrowing at all", or a domain
+    # deactivation that matched nobody revoked the whole partner's invitations.
+    # R17 replaced the precomputed list with a subquery, so an empty match is
+    # an empty IN-list and revokes nothing structurally rather than by an early
+    # return. What still has to be pinned is that the caller passes a domain at
+    # all: `domain=None` would mean the same thing it always did. That is R17's
+    # first positive pattern, which matches the call site verbatim.
     # A threaded "race" test that never actually blocks is the sequential test
     # wearing a disguise, and it passes just as green. The wait assertion is
     # what makes the overlap a fact rather than a hope.
@@ -571,6 +577,25 @@ CHECKS = [
     ("R16 db/init must not create default privileges",
      "db/init/00-roles.sql",
      [], [r"ALTER DEFAULT PRIVILEGES"]),
+
+    # ---- round 17: the domain race, both directions ---------------------
+    # The revocation has to run before the user scan, and the narrowing has to
+    # be a subquery -- a precomputed user_ids list forces the scan to happen
+    # first, which IS the bug. Both are assertable from the signature and the
+    # call, neither of which lives in a stripped region.
+    ("R17 #1 domain revocation narrows by subquery, not a precomputed list",
+     "app/services/partners.py",
+     [r"_revoke_pending_invitations\(db, partner_id, domain=normalized\)",
+      r"domain: str \| None = None"],
+     [r"user_ids"]),
+
+    # The forward-order test cannot express the reverse: _redeem_while opens
+    # the transition first, so the redemption is always the one that waits.
+    ("R17 #1 the reverse order has its own harness and its own test",
+     "tests/test_toctou_lifecycle.py",
+     [r"def _transition_while_redeeming",
+      r"def test_domain_deactivation_still_acts_on_a_user_who_redeemed_first"],
+     []),
 ]
 
 REQUIRED_FILES = [
@@ -617,8 +642,8 @@ REQUIRED_FILES = [
 # def test_ count per file, after this round's patches. test_bypass_truth_table
 # parametrizes into 5. Baseline was 96 functions / 100 collected; this round
 # adds two test files (counts filled in once written).
-EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3   # +9 dispatcher role, +3 default privileges
-EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3
+EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3 + 1   # +9 dispatcher role, +3 default privileges, +1 reverse-order domain race
+EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3 + 1
 
 
 def _strip_comments(src: str) -> str:
