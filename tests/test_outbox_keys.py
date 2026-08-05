@@ -191,3 +191,53 @@ def test_retiring_a_key_makes_its_rows_undecryptable_not_crashing(monkeypatch):
     with pytest.raises(OutboxCryptoError) as exc:
         decrypt_token(ciphertext, nonce, aad, version)
     assert "stranded-token" not in str(exc.value)
+
+
+# --- a repeated version is a configuration that satisfies every other check --
+
+def test_a_duplicate_key_version_is_refused(monkeypatch):
+    """`1:old,1:new` used to parse cleanly and produce a keyring of size one.
+
+    Nothing downstream had a reason to object. len(keys) == 1, so
+    current_key_version() inferred 1 exactly as it does for a correct single-key
+    setup -- the inference rule was not bypassed, it was fed a configuration in
+    which two answers had already been collapsed into one.
+
+    The failure this prevents is not a broken encrypt, which would be loud and
+    recoverable. It is that every row written under the true version-1 key stops
+    decrypting, dead-letters, and has its ciphertext and nonce cleared by the
+    failure path. Startup is the last moment at which that is still reversible,
+    so the refusal belongs here and not at the first dispatch.
+    """
+    monkeypatch.setenv(KEYS_ENV, f"1:{KEY_A},1:{KEY_B}")
+    monkeypatch.delenv(CURRENT_VERSION_ENV, raising=False)
+
+    with pytest.raises(OutboxCryptoError) as exc:
+        validate_outbox_config()
+
+    message = str(exc.value)
+    assert "1" in message
+    # Same discipline as the malformed-key path: name the version, never the
+    # material. An operator reading a startup log should not learn a key from it.
+    assert KEY_A not in message and KEY_B not in message
+
+
+def test_a_duplicate_version_is_refused_in_either_order(monkeypatch):
+    """Order decided which key won, and the two orders are indistinguishable
+    from the outside -- same length, same inferred version, different key.
+
+    Pinning both directions is the point: a check that only rejected one order
+    would leave the other silently choosing, which is the original defect with
+    half the surface.
+    """
+    for raw in (f"1:{KEY_A},1:{KEY_B}", f"1:{KEY_B},1:{KEY_A}"):
+        monkeypatch.setenv(KEYS_ENV, raw)
+        monkeypatch.delenv(CURRENT_VERSION_ENV, raising=False)
+        with pytest.raises(OutboxCryptoError):
+            validate_outbox_config()
+
+    # And a genuine rotation -- two DIFFERENT versions, current named -- is
+    # still accepted, so the new refusal has not made rotation unreachable.
+    monkeypatch.setenv(KEYS_ENV, f"1:{KEY_A},2:{KEY_B}")
+    monkeypatch.setenv(CURRENT_VERSION_ENV, "2")
+    assert validate_outbox_config() == 2

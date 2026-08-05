@@ -33,8 +33,13 @@ logs:
 
 # One shot. Runs as app_dispatcher, which can reach three tables and nothing
 # else -- see 0018.
+#
+# `make dispatch` is a dev convenience. The dispatcher should be invoked
+# directly with `docker compose run --rm dispatcher` in production or when
+# exit-code fidelity matters. The exit-code contract holds for the process,
+# not for the `make` wrapper.
 dispatch:
-	docker compose run --rm dispatcher
+	docker compose run --build --rm dispatcher
 
 # Idempotent. Required once on a database that predates 0018; harmless after.
 provision-dispatcher:

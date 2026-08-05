@@ -74,6 +74,12 @@ services:
       DISPATCHER_DATABASE_URL: postgresql+psycopg://app_dispatcher:dispatcher_pw@db:5432/partner_backend
       OUTBOX_KEYS: ${OUTBOX_KEYS:?OUTBOX_KEYS is required - see .env.example}
       OUTBOX_CURRENT_KEY_VERSION: ${OUTBOX_CURRENT_KEY_VERSION:-}
+      # Passed through UNSET by default, and the dispatcher exits 1 when it is.
+      # There is no delivering sender registered in this build, so `make
+      # dispatch` refuses instead of draining the queue into a print statement
+      # and destroying every token it touches. Registering a provider in
+      # app/services/email.py DELIVERING_SENDERS is what makes this runnable.
+      OUTBOX_SENDER: ${OUTBOX_SENDER:-}
     command: python -m app.dispatcher
 
 volumes:

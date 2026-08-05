@@ -100,6 +100,25 @@ def _keyring() -> dict[int, bytes]:
             raise OutboxCryptoError(
                 f"key version {version_number} is {len(key)} bytes, "
                 f"expected {KEY_BYTES}")
+        if version_number in keys:
+            # A dict silently kept the LAST entry, and every check downstream
+            # then passed. len(keys) stayed 1, so current_key_version() inferred
+            # the version with no complaint -- the "infer only when there is no
+            # other answer" rule defeated by a configuration that made two
+            # answers look like one. Which key won depended on the order they
+            # were written in, and nothing anywhere said which that was.
+            #
+            # The damage is not a failed encrypt. Rows already written under the
+            # real version-1 key stop decrypting, dead-letter, and the failure
+            # path clears ciphertext and nonce -- so the tokens are gone, not
+            # merely unreadable. Refusing at startup is the only point where
+            # this is still reversible.
+            raise OutboxCryptoError(
+                f"key version {version_number} appears more than once in "
+                f"{KEYS_ENV}. Whichever entry won would silently become the key "
+                f"for every row already written under that version. Name each "
+                f"version once, and use a NEW version number to introduce a new "
+                f"key.")
         keys[version_number] = key
     return keys
 

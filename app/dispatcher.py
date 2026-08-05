@@ -35,7 +35,7 @@ import sys
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.services.email import ConsoleEmailSender
+from app.services.email import EmailConfigError, resolve_sender
 from app.services.outbox import dispatch_pending
 from app.services.outbox_crypto import validate_outbox_config
 
@@ -52,14 +52,25 @@ def run(limit: int = 100) -> int:
         return 1
 
     # Fail on configuration before touching the database, so a missing key is a
-    # message about the key rather than a half-drained batch.
+    # message about the key rather than a half-drained batch. Two gates, not
+    # one: keys and senders are different questions, and the API process needs
+    # the first without the second.
     validate_outbox_config()
+    try:
+        sender = resolve_sender()
+    except EmailConfigError as exc:
+        # Not an exception to propagate. A dispatcher with no delivering sender
+        # is a scheduling mistake, and the scheduler reads the exit code -- what
+        # it must not do is drain the queue into a print statement, mark every
+        # row sent, and clear the ciphertext that was the only copy of the token.
+        print(str(exc), file=sys.stderr)
+        return 1
 
     engine = create_engine(url, pool_pre_ping=True)
     Session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     session = Session()
     try:
-        result = dispatch_pending(session, ConsoleEmailSender(), limit=limit)
+        result = dispatch_pending(session, sender, limit=limit)
         session.commit()
     except Exception:
         session.rollback()

@@ -180,6 +180,15 @@ make migrate # run alembic migrations
 make logs    # tail the API container
 ```
 
+The dispatcher is a one-shot worker — invoke it directly:
+
+```bash
+docker compose run --rm dispatcher
+```
+
+`make dispatch` is a dev convenience; the exit-code contract holds for
+the process, not for the `make` wrapper.
+
 Or manually:
 
 ```bash

@@ -596,6 +596,42 @@ CHECKS = [
      [r"def _transition_while_redeeming",
       r"def test_domain_deactivation_still_acts_on_a_user_who_redeemed_first"],
      []),
+
+    # A repeated version parsed cleanly and produced a keyring of size one, so
+    # every downstream check passed and current_key_version() inferred with no
+    # complaint. The refusal has to be at parse time: by the time a dispatcher
+    # meets a row it cannot decrypt, the failure path has already cleared the
+    # ciphertext.
+    ("R17 #4 a repeated key version is refused before it can be inferred from",
+     "app/services/outbox_crypto.py",
+     [r"if version_number in keys:", r"appears more than once"], []),
+
+    ("R17 #4 both orders are pinned, and rotation is still reachable",
+     "tests/test_outbox_keys.py",
+     [r"def test_a_duplicate_key_version_is_refused",
+      r"def test_a_duplicate_version_is_refused_in_either_order",
+      r"validate_outbox_config\(\) == 2"], []),
+
+    # dispatch_pending cannot tell a provider acknowledgement from a print, so
+    # a non-delivering sender consumes the event instead of failing to send.
+    # The default is gone rather than narrowed -- the same move OUTBOX_KEYS made
+    # -- and console is absent from the registry rather than rejected by a check.
+    ("R17 #3 the dispatcher names its sender and has no default",
+     "app/dispatcher.py",
+     [r"resolve_sender\(\)", r"dispatch_pending\(session, sender, limit=limit\)"],
+     [r"ConsoleEmailSender"]),
+
+    ("R17 #3 only delivering senders are nameable",
+     "app/services/email.py",
+     [r"DELIVERING_SENDERS: dict\[str, Callable\[\[\], EmailSender\]\] = \{\}",
+      r"def resolve_sender"],
+     [r"APP_ENV"]),
+
+    ("R17 #3 the refusal is pinned in both directions and before the engine",
+     "tests/test_dispatcher_sender.py",
+     [r"def test_console_cannot_be_named",
+      r"def test_a_registered_sender_is_returned",
+      r"def test_the_dispatcher_exits_nonzero_before_touching_the_database"], []),
 ]
 
 REQUIRED_FILES = [
@@ -642,8 +678,8 @@ REQUIRED_FILES = [
 # def test_ count per file, after this round's patches. test_bypass_truth_table
 # parametrizes into 5. Baseline was 96 functions / 100 collected; this round
 # adds two test files (counts filled in once written).
-EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3 + 1   # +9 dispatcher role, +3 default privileges, +1 reverse-order domain race
-EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3 + 1
+EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3 + 1 + 2 + 4   # +9 dispatcher role, +3 default privileges, +1 reverse-order domain race, +2 duplicate key version
+EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3 + 1 + 2 + 4
 
 
 def _strip_comments(src: str) -> str:
