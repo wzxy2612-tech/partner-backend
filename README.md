@@ -5,9 +5,9 @@ own companies, workspaces, users, branding, workflows and usage, with
 **database-enforced tenant isolation**. The existing direct-customer Stripe flow
 is preserved untouched; partner-managed users bypass Stripe.
 
-Built as a portfolio project. All five feature phases are complete, plus a
-sixth audit-driven hardening round that closed every cross-tenant hole the
-earlier audits surfaced.
+Built as a portfolio project. All five feature phases are complete, plus
+ongoing audit-driven hardening rounds that close cross-tenant holes
+the earlier audits surfaced.
 
 ## The isolation design (structural, not behavioural)
 
@@ -20,13 +20,14 @@ database is the single authority for "which rows belong to this tenant", so a
 missing filter fails **closed** (you see nothing). Application code may add its
 own scoping for ergonomics, but RLS is the backstop.
 
-### Three database roles (privilege boundaries enforced by Postgres)
+### Four database roles (privilege boundaries enforced by Postgres)
 
 | role           | used for                                           | RLS                       |
 |----------------|----------------------------------------------------|---------------------------|
 | `app_owner`    | migrations / DDL only, never at request time       | subject (FORCE)           |
 | `app_runtime`  | partner-facing request path                        | subject, **NOBYPASSRLS**  |
 | `app_platform` | direct-customer / platform-admin / Stripe webhooks | **BYPASSRLS**             |
+| `app_dispatcher` | outbox delivery — per-table `USING (true)` policies | subject (no BYPASSRLS) |
 
 Partner requests can only ever run as `app_runtime`, which cannot see across
 tenants no matter what the query says.
@@ -84,9 +85,12 @@ path (and RLS scope) the request runs under.
 - **Workspaces** form a company-scoped parent/child tree and sit under the same
   ENABLE+FORCE RLS as the other partner tables.
 - **Transactional outbox for email.** Invitation delivery is decoupled from the
-  transaction: an `outbox_events` row is committed inside the SAVEPOINT, and a
-  background worker delivers the email only after the transaction commits. A
-  failed row 2 no longer orphans row 1's email.
+  transaction: an `outbox_events` row is committed inside the SAVEPOINT, and the
+  `app_dispatcher` service delivers the email only after the transaction commits. A
+  failed row 2 no longer orphans row 1's email. Keys are configured via
+  `OUTBOX_KEYS` (`version:hex` pairs, no default, no fallback); each row stores
+  the `key_version` used, enabling rotation (old rows decrypt with the previous
+  key, new rows encrypt with the current one).
 
 ## RBAC & onboarding (Phase 3)
 
@@ -123,8 +127,8 @@ per-row error maps the unique-violation to a stable 409 response.
 
 ## Hardening round (Phase 6)
 
-Nine migrations driven by external audits. Each closes one class of cross-tenant
-hole that the earlier phases left open.
+Fifteen migrations driven by external audits. Each closes one class of
+cross-tenant hole that the earlier phases left open.
 
 | Migration | Hole closed |
 |-----------|-------------|
@@ -137,6 +141,12 @@ hole that the earlier phases left open.
 | **0013** transactional outbox | Invitation emails were sent inside the batch SAVEPOINT — row 2 failure orphaned row 1's email. Outbox decouples delivery from the transaction. |
 | **0014** outbox RLS + bookkeeping | The outbox table shipped with no tenant boundary; any tenant could read, rewrite, or delete another tenant's queued mail. RLS ENABLE + FORCE applied, plus a migration bookkeeping table. |
 | **0015** billing gate function | `billing_contact_email` was the one column outside the write gate (REVOKE + GRANT workaround). A suspended partner's in-flight request could still update it. A DB-side gate function now makes the write decision inside PostgreSQL, closing the TOCTOU window entirely. |
+| **0016** alembic_version grant cleanup | `ALTER DEFAULT PRIVILEGES` (db/init/00-roles.sql) left `alembic_version` granted to `app_platform` (BYPASSRLS), so the migration gate's evidence could be rewritten by the code it constrains. Revoked. |
+| **0017** outbox terminal invariants | The `failed` state allowed a dead-lettered event to retain a recoverable ciphertext+nonce, and the application code chose whether to clear it. Now the state machine is enforced by CHECK constraints: `sent` ↔ ciphertext null, `failed` ↔ ciphertext null. |
+| **0018** app_dispatcher role | A fourth role for outbox delivery. Given BYPASSRLS it would have the blast radius of `app_platform`; instead it gets three narrow per-table `USING (true)` policies, so its reach is opt-in and auditable per table. |
+| **0019** runtime outbox SELECT-only | `app_runtime` previously had DML on `outbox_events` (via default privileges), enabling the reverse redirect: insert a row for another tenant's event and have the dispatcher deliver it. Now `app_runtime` can only SELECT. |
+| **0020** revoke default privileges | `db/init/00-roles.sql` no longer grants default privileges on future objects; `0020` revokes any that survived on already-initialized clusters. New tables are born unreachable; every grant must be explicit in the migration that creates the table. Includes `audit_default_privileges` single-predicate view and `PRIOR_STATE` downgrade reconstruction. |
+| **0021** function EXECUTE grants | PostgreSQL grants `EXECUTE` on new functions to PUBLIC via a hardwired default (`proacl IS NULL`). This is root cause A in its second form: functions are reachable before anyone decides they should be. Revoked; explicit grants added. Includes the `DROP + CREATE` trap warning (CREATE OR REPLACE preserves ACL). |
 
 ## API overview
 
@@ -155,17 +165,27 @@ hole that the earlier phases left open.
 
 ## Tests
 
-≈168 tests across 30 files (`make test`). The suite covers:
+≈216 tests across 36 files (`make test`). The suite covers:
 
 - **Tenant isolation** — visibility, write blocking, cross-tenant FK rejection
 - **Cross-table reference ownership** — FK triggers cannot be used to point at
   another tenant's row (composite FKs + RLS interaction)
 - **RLS coverage** — every partner-owned table verified under RLS
 - **TOCTOU races** — suspend/deactivate vs invitation redemption, with real
-  lock contention (`wait_event_type = 'Lock'`) asserted
+  lock contention (`wait_event_type = 'Lock'`) asserted; reverse-order
+  (redemption before deactivation) also covered
 - **Lifecycle gates** — suspended partner cannot update billing, deactivated
   domain cannot receive invitations
 - **Outbox isolation** — each tenant's queued mail is invisible to other tenants
+- **Outbox crypto** — key configuration (OUTBOX_KEYS, no default), duplicate
+  version rejection, rotation reachability; provider error bodies never
+  stored in last_error (type-only)
+- **Dispatcher sender gates** — no default sender; OUTBOX_SENDER must name a
+  registered delivering sender; console deliberately absent from registry;
+  refusal happens before create_engine (exit 1)
+- **Default privileges / function grants** — new tables and functions born
+  unreachable; audit_default_privileges single predicate; function EXECUTE
+  default (proacl NULL) revoked
 - **Platform role integrity** — forged membership cannot grant platform roles
 - **Scope inheritance** — Partner Super Admin reaches the full subtree;
   Company Admin is bounded to its own company
@@ -218,18 +238,20 @@ docker compose exec api pytest
   monthly token-usage tracking, 60-day suspension purge + 1-year thread archival.
 - **Phase 6 (done):** audit-driven hardening — composite tenant FKs, value
   constraints, platform tenant materialization, role integrity, RLS active-state
-  gate, workspace parent same-company, transactional outbox, billing gate function.
+  gate, workspace parent same-company, transactional outbox, billing gate function,
+  alembic_version grant cleanup (0016), outbox terminal invariants (0017),
+  app_dispatcher role (0018), runtime outbox SELECT-only (0019), revoke default
+  privileges (0020), function EXECUTE grants (0021).
 
 **Next:** production deployment (containerized, multi-instance), observability
 (metrics / tracing), rate limiting, per-partner email uniqueness, SMTP email
-delivery.
+delivery (requires registering a delivering sender in
+`DELIVERING_SENDERS`).
 
 ## Known limitations
 
-- **Console email by default.** `EmailSender` prints to stdout unless a custom
-  implementation is wired in. SMTP delivery is not configured out of the box.
-- **No rate limiting.** API requests are unbounded; add a middleware or gateway
-  layer before production exposure.
+- **No delivering sender configured.** `DELIVERING_SENDERS` is empty in this build; `OUTBOX_SENDER` must name a registered provider, and `ConsoleEmailSender` is deliberately not registerable (it would drain the queue into stdout and destroy every token). Registering an SMTP or provider sender is the one change that makes the dispatcher runnable.
+- **No rate limiting.** API requests are unbounded; add a middleware or gateway layer before production exposure.
 - **Single-instance design.** The current `docker compose` setup runs one API
   replica; horizontal scaling requires a shared session store and connection
   pooler.
