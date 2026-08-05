@@ -211,6 +211,23 @@ docker compose run --rm --build dispatcher
 `make dispatch` is a dev convenience; the exit-code contract holds for
 the process, not for the `make` wrapper.
 
+### Local dev: decode a queued invitation token
+
+The outbox has no delivering sender, so no invitation mail is produced
+locally. `tools/dev/dev_decode_invite_token.py` decrypts queued tokens for
+building the activation page. It is a decryption oracle, so it must be
+named, with no default:
+
+```bash
+ALLOW_TOKEN_DECRYPT=i-understand \
+docker compose exec -T -e ALLOW_TOKEN_DECRYPT -e PYTHONPATH=/app api \
+    python3 tools/dev/dev_decode_invite_token.py
+```
+
+Truthiness is not consent: only the exact phrase runs it. CORS
+(`CORS_ALLOW_ORIGINS`) is off by default; set it to a comma-separated
+literal list of origins — a wildcard is refused.
+
 Or manually:
 
 ```bash
@@ -255,6 +272,7 @@ delivery (requires registering a delivering sender in
 - **No delivering sender configured.** `DELIVERING_SENDERS` is empty in this build; `OUTBOX_SENDER` must name a registered provider, and `ConsoleEmailSender` is deliberately not registerable (it would drain the queue into stdout and destroy every token). Registering an SMTP or provider sender is the one change that makes the dispatcher runnable.
 - **Implicit delivery assertion (`provider_message_id` is an unpopulated slot).** The outbox considers an event `sent` as long as `send_invitation()` returns without raising, rather than recording a provider delivery receipt ID. `outbox_events.provider_message_id` exists in the schema (0013) but is not yet written at dispatch time.
 - **No CI pipeline.** Automated tests and `verify_fixes.py` are executed locally or inside containers (`make test`), but no GitHub Actions / CI workflow is configured yet.
+- **Dependencies declare lower bounds only.** `requirements.txt` has no lock file and no hashes; a fresh build may pull newer versions (mako already dragged in a top-level `tools` package that collides with the project's own `tools/` directory — worked around via `PYTHONPATH`). Reproducible builds and supply-chain verification are deferred to the CI stage.
 - **No rate limiting.** API requests are unbounded; add a middleware or gateway layer before production exposure.
 - **Single-instance design.** The current `docker compose` setup runs one API
   replica; horizontal scaling requires a shared session store and connection
