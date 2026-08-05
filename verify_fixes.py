@@ -645,6 +645,26 @@ CHECKS = [
     # The old regression test passed while the defect was live: its sender
     # raised a message with no token in it, so absence proved nothing. The
     # adversary has to echo what it was handed.
+    # Root cause A, function form. proacl IS NULL means "the default", and the
+    # default includes PUBLIC EXECUTE -- a guard that only aclexplode()s a
+    # non-null acl reports exactly the untouched functions as clean.
+    # The SQL itself is unreachable from here: it lives in triple-quoted
+    # constants, which _strip_comments removes wholesale. So this pins the
+    # SHAPE -- the constants exist, the grants are declared per function -- and
+    # the CONTENT (proacl IS NULL is treated as PUBLIC, the default privilege is
+    # revoked) is pinned by tests/test_function_grants.py against a real
+    # database. Writing a pattern for the SQL would report "not found" forever.
+    ("R17 #6 the guard treats a null proacl as PUBLIC, not as clean",
+     "alembic/versions/0021_function_execute_grants.py",
+     [r"AUDIT_VIEW", r"DEFAULT_PRIVILEGE", r"FUNCTION_GRANTS",
+      r'"public\.partner_is_active\(uuid\)"'], []),
+
+    ("R17 #6 the revoke is paired with the grants the callers still need",
+     "tests/test_function_grants.py",
+     [r"def test_the_callers_kept_the_execute_they_need",
+      r"def test_a_new_function_is_born_uncallable",
+      r"has_function_privilege\('app_dispatcher'"], []),
+
     ("R17 #2 the adversary echoes its arguments",
      "tests/test_outbox.py",
      [r"class _Echo", r"token \{token\} not accepted",
@@ -653,6 +673,11 @@ CHECKS = [
 ]
 
 REQUIRED_FILES = [
+    "alembic/versions/0021_function_execute_grants.py",
+    "tests/test_function_grants.py",
+    "tests/test_dispatcher_sender.py",
+    "app/services/email.py",
+    "app/dispatcher.py",
     "alembic/versions/0007_composite_tenant_fks.py",
     "alembic/versions/0008_value_constraints_and_grants.py",
     "alembic/versions/0009_platform_tenant.py",
@@ -696,8 +721,8 @@ REQUIRED_FILES = [
 # def test_ count per file, after this round's patches. test_bypass_truth_table
 # parametrizes into 5. Baseline was 96 functions / 100 collected; this round
 # adds two test files (counts filled in once written).
-EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3 + 1 + 2 + 4 + 1   # +9 dispatcher role, +3 default privileges, +1 reverse-order domain race, +2 duplicate key version
-EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3 + 1 + 2 + 4 + 1
+EXPECTED_DEF_TESTS = 96 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3 + 1 + 2 + 4 + 1 + 4   # +9 dispatcher role, +3 default privileges, +1 reverse-order domain race, +2 duplicate key version
+EXPECTED_COLLECTED = 100 + 11 + 12 + 6 + 6 + 9 + 11 + 4 + 12 + 2 + 7 + 10 + 6 + 9 + 3 + 1 + 2 + 4 + 1 + 4
 
 
 def _strip_comments(src: str) -> str:
